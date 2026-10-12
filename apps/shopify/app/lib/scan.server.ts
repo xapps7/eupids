@@ -114,17 +114,35 @@ export async function ingest(db: PrismaClient, shopId: string, scanId: string, u
     const res = await fetchImpl(url);
     if (!res.ok || !res.body) throw new Error(`Could not download bulk results (${res.status})`);
     let batch: SnapshotRow[] = [];
-    for await (const line of lines(res.body)) {
-      const node = JSON.parse(line) as VariantNode & { __parentId?: string };
-      if (node.__parentId || !node.id?.includes("ProductVariant")) continue;
-      batch.push(nodeToSnapshot(shopId, node, scanId));
-      total++;
-      if (batch.length >= BATCH) {
+    // Bulk JSONL puts nested connection entries (barcodes) on their own lines after the parent,
+    // tagged with __parentId. Hold the current variant until its children have been read.
+    let pending: VariantNode | null = null;
+    const flush = async (force: boolean) => {
+      if (pending) {
+        batch.push(nodeToSnapshot(shopId, pending, scanId));
+        total++;
+        pending = null;
+      }
+      if (batch.length >= BATCH || (force && batch.length)) {
         await writeBatch(db, shopId, batch);
         batch = [];
       }
+    };
+    for await (const line of lines(res.body)) {
+      const obj = JSON.parse(line) as VariantNode & { __parentId?: string; value?: string; type?: string | null };
+      if (obj.__parentId) {
+        if (pending && obj.__parentId === pending.id && typeof obj.value === "string") {
+          const list = (pending.barcodes ??= { nodes: [] });
+          list.nodes.push({ value: obj.value, type: obj.type ?? null });
+        }
+        continue;
+      }
+      if (!obj.id?.includes("ProductVariant")) continue;
+      await flush(false);
+      // Child lines will fill `barcodes`; start empty unless the node already carries them inline.
+      pending = { ...obj, barcodes: obj.barcodes?.nodes ? obj.barcodes : { nodes: [] } };
     }
-    await writeBatch(db, shopId, batch);
+    await flush(true);
   }
   // Variants deleted in Shopify: not in this scan and not touched by the guard since the scan began.
   await db.variantSnapshot.deleteMany({
@@ -136,6 +154,7 @@ export async function ingest(db: PrismaClient, shopId: string, scanId: string, u
     data: { status: "complete", finishedAt: new Date(), variantsTotal: total, variantsInScope: r.inScope, error: null },
   });
   log.info("scan_complete", { shopId, scanId, total, inScope: r.inScope, ready: r.ready });
+  await queueEuSync(db, shopId);
   return { total, ...r };
 }
 
@@ -161,4 +180,11 @@ export async function latestScan(db: PrismaClient, shopId: string) {
 
 export async function lastGoodScan(db: PrismaClient, shopId: string) {
   return db.scan.findFirst({ where: { shopId, status: "complete" }, orderBy: { finishedAt: "desc" } });
+}
+
+/** Queue an EU orders refresh unless one is already waiting or running. */
+export async function queueEuSync(db: PrismaClient, shopId: string) {
+  const busy = await db.job.findFirst({ where: { shopId, type: "eu_sync", status: { in: ["queued", "running"] } } });
+  if (busy) return busy;
+  return db.job.create({ data: { shopId, type: "eu_sync", payload: {}, actor: "system", total: 1 } });
 }

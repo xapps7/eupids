@@ -4,12 +4,24 @@ import { useFetcher, useRevalidator } from "react-router";
 
 export const SEVERITY_TONE = { error: "critical", warning: "warning", info: "info" } as const;
 
+/** The three codes in plain words. The customs names stay in small print only. */
+export const CODES = {
+  mpid: { name: "Your SKU", what: "Your own product code, one per item.", where: "the SKU field", customs: "M-PID (merchant product ID)" },
+  nspid: {
+    name: "Manufacturer code",
+    what: "The maker’s own model or part number. Your supplier has it.",
+    where: "no field of its own. PID Ready saves it in a product field carriers can read.",
+    customs: "NS-PID (manufacturer product ID)",
+  },
+  spid: { name: "Barcode", what: "The EAN, UPC or ISBN, if the item has one. If not, you mark it “no barcode”.", where: "the Barcode field", customs: "S-PID (standard ID), or Y081 if none" },
+} as const;
+
 export const RULE_LABEL: Record<string, string> = {
   "R-MPID-01": "SKU missing",
-  "R-MPID-02": "SKU duplicated",
+  "R-MPID-02": "SKU repeated",
   "R-NSPID-01": "Manufacturer code missing",
   "R-NSPID-02": "Manufacturer code = SKU",
-  "R-NSPID-03": "Own brand",
+  "R-NSPID-03": "Own brand: same as SKU",
   "R-NSPID-04": "Manufacturer code invalid",
   "R-NSPID-05": "Non-Latin characters",
   "R-SPID-01": "Barcode missing",

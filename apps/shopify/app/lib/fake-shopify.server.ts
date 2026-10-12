@@ -15,10 +15,23 @@ export type FakeVariant = {
   requiresShipping: boolean;
   sku: string | null;
   barcode: string | null;
+  /** Extra barcodes after the first (2026-10 multi-barcode). */
+  extraBarcodes?: { value: string; type: string | null }[];
   hsCode: string | null;
   countryOfOrigin: string | null;
   updatedAt: string;
   metafields: Record<string, { type: string; value: string }>; // "ns.key"
+};
+
+export type FakeOrder = {
+  id: string;
+  name: string;
+  createdAt: string;
+  country: string;
+  cancelled?: boolean;
+  test?: boolean;
+  b2b?: boolean;
+  lines: { variantId: string; quantity: number }[];
 };
 
 export type FakeDefinition = { id: string; name: string; namespace: string; key: string; type: { name: string } };
@@ -28,6 +41,8 @@ export class FakeShopify {
   definitions: FakeDefinition[] = [];
   bulkOps = new Map<string, { status: string; url: string | null; objectCount: number }>();
   calls: { op: string; variables?: any }[] = [];
+  orders: FakeOrder[] = [];
+  denyOrders = false;
   shipsTo = ["US", "GB", "DE", "FR"];
   failNextBulk = 0;
   throttleNext = 0;
@@ -73,6 +88,7 @@ export class FakeShopify {
       id: v.id,
       sku: v.sku,
       barcode: v.barcode,
+      barcodes: { nodes: [...(v.barcode ? [{ value: v.barcode, type: null as string | null }] : []), ...(v.extraBarcodes ?? [])] },
       updatedAt: v.updatedAt,
       title: v.title,
       product: {
@@ -182,6 +198,12 @@ export class FakeShopify {
           if (!v) return errors.push({ field: ["variants", String(i)], message: "Variant not found" });
           if (u.inventoryItem?.sku === "REJECT-ME") return errors.push({ field: ["variants", String(i), "sku"], message: "SKU rejected by Shopify" });
           if ("barcode" in u) v.barcode = u.barcode || null;
+          if (Array.isArray(u.barcodes)) {
+            if ("barcode" in u) return errors.push({ field: ["variants", String(i), "barcodes"], message: "Can't set barcode and barcodes together" });
+            if (u.barcodes.length > 20) return errors.push({ field: ["variants", String(i), "barcodes"], message: "At most 20 barcodes" });
+            v.barcode = u.barcodes[0]?.value ?? null;
+            v.extraBarcodes = u.barcodes.slice(1).map((b: any) => ({ value: b.value, type: b.type ?? null }));
+          }
           if (u.inventoryItem && "sku" in u.inventoryItem) v.sku = u.inventoryItem.sku || null;
           v.updatedAt = this.tick();
         });
@@ -216,6 +238,40 @@ export class FakeShopify {
           v.updatedAt = this.tick();
         }
         return { inventoryItemUpdate: { inventoryItem: { id: vars.id }, userErrors: [] } };
+      }
+      case "EuOrders": {
+        if (this.denyOrders) throw new Error("Access denied for orders field. Required access: `read_orders` access scope.");
+        const since = /created_at:>=(\S+)/.exec(String(vars.q))?.[1] ?? "1970-01-01";
+        const all = this.orders.filter((o) => o.createdAt >= since).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        const start = vars.after ? Number(vars.after) : 0;
+        const page = all.slice(start, start + 25);
+        return {
+          orders: {
+            nodes: page.map((o) => ({
+              id: o.id,
+              name: o.name,
+              createdAt: o.createdAt,
+              cancelledAt: o.cancelled ? o.createdAt : null,
+              test: !!o.test,
+              shippingAddress: { countryCodeV2: o.country },
+              purchasingEntity: { __typename: o.b2b ? "PurchasingCompany" : "Customer" },
+              lineItems: {
+                nodes: o.lines.map((l) => {
+                  const v = this.variants.get(l.variantId);
+                  return {
+                    title: v?.productTitle ?? "Deleted product",
+                    variantTitle: v?.title ?? null,
+                    sku: v?.sku ?? null,
+                    quantity: l.quantity,
+                    variant: v ? { id: v.id } : null,
+                    originalUnitPriceSet: { shopMoney: { amount: "24.00", currencyCode: "USD" } },
+                  };
+                }),
+              },
+            })),
+            pageInfo: { hasNextPage: start + 25 < all.length, endCursor: String(start + 25) },
+          },
+        };
       }
       default:
         throw new Error(`FakeShopify: unhandled operation ${op}`);
@@ -266,6 +322,21 @@ export function seedDemo(f: FakeShopify, variantsTarget = 60) {
       });
     }
     p++;
+  }
+  // Demo orders: a third of the catalogue sells to the EU, the rest to the US and UK.
+  const ids = [...f.variants.keys()];
+  const eu = ["DE", "FR", "NL", "IT", "ES", "IE"];
+  const day = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString();
+  for (let i = 0; i < 40; i++) {
+    const country = i % 3 === 0 ? "US" : i % 5 === 0 ? "GB" : eu[i % eu.length]!;
+    const pick = (k: number) => ids[(i * 7 + k * 3) % Math.max(1, Math.floor(ids.length / 3))]!;
+    f.orders.push({
+      id: `gid://shopify/Order/${5000 + i}`,
+      name: `#${1001 + i}`,
+      createdAt: day(1 + i),
+      country,
+      lines: [{ variantId: pick(0), quantity: 1 + (i % 2) }, ...(i % 4 === 0 ? [{ variantId: pick(1), quantity: 1 }] : [])],
+    });
   }
   f.add({ productId: "gid://shopify/Product/9001", productTitle: "Gift Card", vendor: "Indigo Loom", isGiftCard: true, requiresShipping: false });
   f.add({ productId: "gid://shopify/Product/9002", productTitle: "Muslin Swaddle (draft)", vendor: "Kanpur Cotton Mills", status: "DRAFT" });

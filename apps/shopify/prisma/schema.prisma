@@ -47,6 +47,11 @@ model Shop {
   installedAt    DateTime  @default(now())
   uninstalledAt  DateTime?
   planCheckedAt  DateTime?
+  // EU orders focus: which variants were shipped to EU shoppers (last 60 days).
+  euSyncStatus   String?   // null (never) | running | ok | no_access | failed
+  euSyncError    String?
+  euSyncedAt     DateTime?
+  euOrderCount   Int       @default(0)
 
   settings          Settings?
   scans             Scan[]
@@ -55,6 +60,8 @@ model Shop {
   supplierRequests  SupplierRequest[]
   jobs              Job[]
   audit             AuditLog[]
+  euDemand          EuDemand[]
+  euOrders          EuOrder[]
 }
 
 model Settings {
@@ -69,6 +76,8 @@ model Settings {
   weeklyEmail       Boolean  @default(true)
   mappingRequired   Boolean  @default(false) // E-09: default key exists with a different type
   euBannerDismissed Boolean  @default(false)
+  euOnly            Boolean  @default(true) // dashboard + issues show only items shipped to the EU
+  provider          String   @default("") // who files EU customs: zonos | passport | managed_markets | shipping_app | carrier_portal | broker
   updatedAt         DateTime @updatedAt
 }
 
@@ -105,6 +114,7 @@ model VariantSnapshot {
   barcodes             String[]
   nspid                String?
   noStandardIdentifier Boolean   @default(false)
+  nspidInBarcodes      Boolean   @default(false) // the manufacturer code is also one of the variant's barcodes
   hsCode               String?
   countryOfOrigin      String?
   imageUrl             String?
@@ -229,4 +239,32 @@ model WebhookEvent {
 
   @@index([receivedAt])
   @@index([shopDomain])
+}
+
+// Per-variant EU demand from orders shipped to EU countries in the last 60 days.
+// Rebuilt on every sync. No customer data: only counts.
+model EuDemand {
+  shopId      String
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  variantId   String
+  orders      Int
+  units       Int
+  lastOrderAt DateTime
+
+  @@id([shopId, variantId])
+}
+
+// Recent EU orders, for the printable customs-codes sheet. Order number, country and
+// line items only: no names, emails, addresses or phone numbers.
+model EuOrder {
+  shopId    String
+  shop      Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  orderId   String
+  name      String
+  createdAt DateTime
+  country   String
+  lines     Json // [{ variantId, title, variantTitle, sku, quantity, unitPrice, currency }]
+
+  @@id([shopId, orderId])
+  @@index([shopId, createdAt])
 }

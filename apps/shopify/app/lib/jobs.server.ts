@@ -2,18 +2,20 @@
 // (inside the Gql client), at most 2 running jobs per shop, resumable after a crash.
 import type { Job, PrismaClient } from "@prisma/client";
 import type { Gql } from "./gql.server";
-import { applyChanges, type WriteItem } from "./writes.server";
+import { addNspidToBarcodes, applyChanges, type WriteItem } from "./writes.server";
+import { syncEuOrders } from "./eu-orders.server";
 import { reevaluateShop } from "./evaluate.server";
 import { log } from "./log.server";
 
 export const BATCH = 25;
 export const MAX_RUNNING_PER_SHOP = 2;
 
-export type JobType = "no_barcode_bulk" | "csv_apply" | "supplier_apply";
+export type JobType = "no_barcode_bulk" | "csv_apply" | "supplier_apply" | "barcode_sync" | "eu_sync";
 
 export type NoBarcodePayload = { variantIds: string[] };
 export type CsvApplyPayload = { items: WriteItem[]; fileName?: string };
 export type SupplierApplyPayload = { requestId: string; submissionIds: string[] };
+export type BarcodeSyncPayload = { variantIds: string[] };
 
 export type Failure = { variantId: string; status: string; errors: Record<string, string> };
 
@@ -24,6 +26,9 @@ export async function enqueue(db: PrismaClient, shopId: string, type: JobType, p
 /** Resolve the items a job writes. Supplier jobs read submissions at run time (E-11). */
 async function itemsFor(db: PrismaClient, job: Job): Promise<WriteItem[]> {
   switch (job.type as JobType) {
+    case "barcode_sync":
+    case "eu_sync":
+      return [];
     case "no_barcode_bulk":
       return (job.payload as NoBarcodePayload).variantIds.map((variantId) => ({ variantId, changes: { noStandardIdentifier: true } }));
     case "csv_apply":
@@ -53,7 +58,14 @@ export async function runJob(db: PrismaClient, gql: Gql, jobId: string) {
     await db.job.update({ where: { id: job.id }, data: { status: "failed" } });
     return;
   }
+  if (job.type === "eu_sync") {
+    const r = await syncEuOrders(db, gql, job.shopId);
+    await db.job.update({ where: { id: job.id }, data: { status: r.ok ? "complete" : "failed", done: 1, total: 1 } });
+    return;
+  }
   const items = await itemsFor(db, job);
+  const syncIds = job.type === "barcode_sync" ? (job.payload as BarcodeSyncPayload).variantIds : null;
+  const count = syncIds ? syncIds.length : items.length;
   const failures: Failure[] = Array.isArray(job.failures) ? (job.failures as Failure[]) : [];
   let done = job.done;
   let failed = job.failed;
@@ -61,20 +73,22 @@ export async function runJob(db: PrismaClient, gql: Gql, jobId: string) {
   const perField = job.type !== "no_barcode_bulk";
 
   // Resume from where a crashed run stopped; re-applying is safe because only diffs are written.
-  for (let i = done; i < items.length; i += BATCH) {
+  for (let i = done; i < count; i += BATCH) {
     const still = await db.shop.findUnique({ where: { id: job.shopId }, select: { active: true } });
     if (!still?.active) {
       await db.job.update({ where: { id: job.id }, data: { status: "failed" } });
       return;
     }
-    const batch = items.slice(i, i + BATCH);
-    const outcomes = await applyChanges(
-      db,
-      gql,
-      { shopId: job.shopId, actor, auditAction: job.type },
-      batch,
-      { reevaluate: false, audit: perField ? "per-field" : "none" },
-    );
+    const batchLen = Math.min(BATCH, count - i);
+    const outcomes = syncIds
+      ? await addNspidToBarcodes(db, gql, { shopId: job.shopId, actor }, syncIds.slice(i, i + BATCH))
+      : await applyChanges(
+          db,
+          gql,
+          { shopId: job.shopId, actor, auditAction: job.type },
+          items.slice(i, i + BATCH),
+          { reevaluate: false, audit: perField ? "per-field" : "none" },
+        );
     for (const o of outcomes) {
       const hasErr = o.status === "conflict" || o.status === "missing" || o.status === "error" || Object.keys(o.errors).length > 0;
       if (hasErr) {
@@ -82,7 +96,7 @@ export async function runJob(db: PrismaClient, gql: Gql, jobId: string) {
         failures.push({ variantId: o.variantId, status: o.status, errors: o.errors as Record<string, string> });
       }
     }
-    done = Math.min(items.length, i + batch.length);
+    done = Math.min(count, i + batchLen);
     await db.job.update({ where: { id: job.id }, data: { done, failed, failures: failures as any } });
   }
 

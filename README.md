@@ -75,14 +75,38 @@ npm run dev:demo         # the whole app on http://localhost:3000 with a demo st
 | UC-16 uninstall + shop/redact | Done, tested (AT-17) | `lib/webhooks.server.ts` |
 | UC-17 free checker | Done, tested (AT-18) | `apps/checker` |
 | UC-18 weekly email, FR-17/18/19 | Not built (P1/P2) | Settings has the opt-out switch |
+| Added 12 Oct: EU focus (only items shipped to EU shoppers, last 60 days) | Done, tested | `lib/eu-orders.server.ts`, dashboard + Issues |
+| Added 12 Oct: Send codes page (provider guide, copy manufacturer codes to barcodes, customs file, print sheet) | Done, tested | `routes/app.ship.*`, `lib/providers.ts`, `lib/ship.server.ts` |
+| Added 12 Oct: multi-barcode read/write (Admin API 2026-10 `barcodes`) | Done, tested | `lib/snapshot.ts`, `lib/writes.server.ts` |
 
 ### Deviations and open items
 
-- **API version:** pinned to `2026-07`, the newest the Shopify library ships today. Bump to `2026-10` when the library adds it.
+- **API version:** `2026-10`, passed as a string (the installed library's enum stops at 2026-07). Needed for `ProductVariant.barcodes`.
+- **Orders scope (changes the PRD's "no orders" rule):** `read_orders` is used to find which items ship to EU shoppers. Only order number, date, country and line items are read; no names, emails, phones or street addresses (protected customer data level 1). B2B, cancelled and test orders are skipped. `customers/redact` deletes listed orders from the print list.
+- **Where carriers read the manufacturer code:** Zonos and Passport ask for it as an extra variant barcode, so the Send page can copy it there (untyped: the API has no NS-PID barcode type). It is still saved in `customs.manufacturer_product_id`.
 - **Variant panel** is a full page, not a side panel. Same fields and behaviour.
 - **Upgrade flow** opens the Plans page instead of a modal. After approval the blocked save resumes automatically.
 - **Collection filter (UC-03)** is not built. Reading collections inside the bulk query needs a nested connection; left out to keep the scan fast.
 - **R-NSPID-05** is an added warning code for E-16 (non-Latin characters), pending Q-04.
 - **E-05:** Shopify's per-product maximum is 2,048 variants, so the fixture uses 2,048, not 2,100.
-- **Q-01** (multi-value barcodes GraphQL field) is still open. The app reads `ProductVariant.barcode`; the checker reads both CSV formats.
+- **Q-01** resolved: `ProductVariant.barcodes` (2026-10). Typed UPC/EAN/GTIN/ISBN count as barcodes, ASIN is ignored, an extra untyped non-numeric entry counts as the manufacturer code.
 - **AT-19** (token refresh) is handled by the Shopify library's expiring offline tokens. It needs a real store to verify.
+
+## Live deployment (12 Oct 2026)
+
+| Piece | Where |
+| --- | --- |
+| App server | AWS EC2 `t3a.small` "pidready", us-east-2, **https://pid.revguardlabs.com** (Caddy, auto HTTPS; https://3-151-142-171.sslip.io kept as fallback) |
+| Database | Neon project **EUPIDS** (us-east-2), pooled URL for the app, direct URL for migrations |
+| Secrets & settings | AWS Systems Manager Parameter Store under `/pidready/` |
+| Code | github.com/xapps7/eupids — every push to `main` deploys (GitHub Actions → OIDC role `pidready-github-deploy` → S3 → SSM → server rebuild) |
+| Shopify app | "PID Ready" in the RevGuardLabs Dev Dashboard, client ID `14e4b73d7eb1e9959406e22419c06133` |
+| Dev store | `pidready-dev.myshopify.com` — app installed, first scan complete |
+| Free checker | https://pid.revguardlabs.com/checker/ |
+| DNS | GoDaddy, revguardlabs.com: A record `pid` → 3.151.142.171 (Elastic IP) |
+
+Approximate cost: about $17/month (EC2 + public IP + 20 GB disk); Neon on its free tier.
+
+Shopify app version **pid-ready-3** is active (12 Oct 2026): custom domain, 6 webhook subscriptions (products create/update, bulk_operations/finish, app/uninstalled, app/scopes_update, app_subscriptions/update) and the 3 privacy compliance webhooks. To push config changes later: `npx shopify app deploy` from `apps/shopify` (the old `--force` flag no longer exists).
+
+Still to do before App Store submission: declare protected customer data (level 1, orders) in the Dev Dashboard, add `read_orders` to `/pidready/SCOPES`, test a paid plan on the dev store (test charge), then write the listing (name, screenshots, privacy policy URL, support email).

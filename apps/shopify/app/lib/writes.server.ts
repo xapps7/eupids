@@ -14,7 +14,8 @@ import {
   nodesQuery,
   type NspidKey,
 } from "./queries";
-import { nodeToSnapshot, type VariantNode } from "./snapshot";
+import { isValidGtin, normalizeBarcode } from "@pidready/rules";
+import { barcodeList, nodeToSnapshot, splitBarcodes, type BarcodeEntry, type VariantNode } from "./snapshot";
 import { NOSTD } from "./metafields.server";
 import { normalizeChange, type EditableField, type VariantChange } from "./validate";
 import { reevaluateShop } from "./evaluate.server";
@@ -53,14 +54,50 @@ async function fetchNodes(gql: Gql, k: NspidKey, ids: string[]) {
 }
 
 function currentValues(n: VariantNode) {
+  const split = splitBarcodes(barcodeList(n), n.nspid?.value?.trim() || null);
   return {
     sku: n.sku || null,
-    barcode: n.barcode || null,
+    barcode: split.standard[0] || null,
     nspid: n.nspid?.value || null,
     noStandardIdentifier: n.noStd?.value === "true",
     hsCode: n.inventoryItem?.harmonizedSystemCode || null,
     countryOfOrigin: n.inventoryItem?.countryCodeOfOrigin || null,
   };
+}
+
+/** Does this Shopify answer carry the 2026-10 barcode list? Then we write the whole list. */
+const hasBarcodeList = (n: VariantNode) => !!n.barcodes && Array.isArray(n.barcodes.nodes);
+
+/**
+ * Build the full barcode list to send (`barcodes` replaces the whole set). Keeps every other
+ * entry in place and in order:
+ *  - barcode change: replace the entry that counts as the standard barcode, or put the new one first
+ *  - manufacturer code change: if the old code is in the list, swap it for the new one
+ */
+export function nextBarcodes(n: VariantNode, diff: VariantChange): BarcodeEntry[] | null {
+  const list = barcodeList(n).map((b) => ({ value: b.value, type: b.type ?? null }));
+  const oldNspid = n.nspid?.value?.trim() || null;
+  let changed = false;
+  if ("barcode" in diff) {
+    const std = splitBarcodes(list, oldNspid).standard[0];
+    const idx = std ? list.findIndex((b) => b.value.trim() === std) : -1;
+    const nv = diff.barcode ? normalizeBarcode(diff.barcode) : "";
+    const entry = { value: nv, type: nv && isValidGtin(nv) ? "GTIN" : null };
+    if (nv) {
+      if (idx >= 0) list[idx] = entry;
+      else list.unshift(entry);
+    } else if (idx >= 0) list.splice(idx, 1);
+    changed = true;
+  }
+  if ("nspid" in diff && oldNspid) {
+    const idx = list.findIndex((b) => !b.type && b.value.trim() === oldNspid);
+    if (idx >= 0) {
+      if (diff.nspid) list[idx] = { value: diff.nspid, type: null };
+      else list.splice(idx, 1);
+      changed = true;
+    }
+  }
+  return changed ? list : null;
 }
 
 export async function applyChanges(
@@ -119,18 +156,24 @@ export async function applyChanges(
 
   // 1) SKU + barcode, grouped per product.
   const byProduct = new Map<string, Plan[]>();
+  const newLists = new Map<string, BarcodeEntry[]>();
   for (const p of plans) {
-    if (!("sku" in p.diff) && !("barcode" in p.diff)) continue;
+    const list2 = hasBarcodeList(p.node) ? nextBarcodes(p.node, p.diff) : null;
+    if (list2) newLists.set(p.node.id, list2);
+    if (!("sku" in p.diff) && !("barcode" in p.diff) && !list2) continue;
     const list = byProduct.get(p.node.product.id) ?? [];
     list.push(p);
     byProduct.set(p.node.product.id, list);
   }
   for (const [productId, list] of byProduct) {
-    const variants = list.map((p) => ({
-      id: p.node.id,
-      ...("barcode" in p.diff ? { barcode: p.diff.barcode ?? "" } : {}),
-      ...("sku" in p.diff ? { inventoryItem: { sku: p.diff.sku ?? "" } } : {}),
-    }));
+    const variants = list.map((p) => {
+      const bl = newLists.get(p.node.id);
+      return {
+        id: p.node.id,
+        ...(bl ? { barcodes: bl } : "barcode" in p.diff ? { barcode: p.diff.barcode ?? "" } : {}),
+        ...("sku" in p.diff ? { inventoryItem: { sku: p.diff.sku ?? "" } } : {}),
+      };
+    });
     try {
       const res = await gql<any>(VARIANTS_BULK_UPDATE, { productId, variants });
       const errs: { field?: string[]; message: string }[] = res?.productVariantsBulkUpdate?.userErrors ?? [];
@@ -255,4 +298,81 @@ export async function refreshSnapshots(db: PrismaClient, shopId: string, nodes: 
   // Keep the scan id of existing rows; new rows get none. Flags are set by the evaluator.
   const rows = nodes.map((n) => nodeToSnapshot(shopId, n, null));
   await upsertSnapshots(db, rows, { keepScanId: true });
+}
+
+/**
+ * Zonos and Passport read the manufacturer code from the variant's barcode list, not from a
+ * metafield. Append the stored code (metafield) as an extra untyped barcode, keeping every
+ * existing barcode first and in order. Shopify's API has no NS-PID barcode type, so the entry
+ * has no type. Variants already carrying it, or with 20 barcodes, are skipped.
+ */
+export async function addNspidToBarcodes(db: PrismaClient, gql: Gql, ctx: WriteCtx, variantIds: string[]): Promise<WriteOutcome[]> {
+  const k = await nspidKey(db, ctx.shopId);
+  const live = await fetchNodes(gql, k, variantIds);
+  const outcomes = new Map<string, WriteOutcome>();
+  for (const id of variantIds) outcomes.set(id, { variantId: id, status: "unchanged", written: [], errors: {} });
+  const byProduct = new Map<string, { id: string; barcodes: BarcodeEntry[]; value: string }[]>();
+  for (const id of variantIds) {
+    const n = live.get(id);
+    const o = outcomes.get(id)!;
+    if (!n) {
+      o.status = "missing";
+      o.errors.general = "This variant no longer exists in Shopify.";
+      continue;
+    }
+    const value = n.nspid?.value?.trim();
+    if (!value) continue;
+    if (!hasBarcodeList(n)) {
+      o.status = "error";
+      o.errors.general = "This store's Shopify version can't hold more than one barcode yet.";
+      continue;
+    }
+    const list = barcodeList(n).map((b) => ({ value: b.value, type: b.type ?? null }));
+    if (list.some((b) => b.value.trim() === value)) continue;
+    if (list.length >= 20) {
+      o.status = "error";
+      o.errors.general = "This variant already has 20 barcodes, Shopify's maximum.";
+      continue;
+    }
+    const arr = byProduct.get(n.product.id) ?? [];
+    arr.push({ id, barcodes: [...list, { value, type: null }], value });
+    byProduct.set(n.product.id, arr);
+  }
+  const audits: any[] = [];
+  for (const [productId, list] of byProduct) {
+    try {
+      const res = await gql<any>(VARIANTS_BULK_UPDATE, { productId, variants: list.map((v) => ({ id: v.id, barcodes: v.barcodes })) });
+      const errs: { field?: string[]; message: string }[] = res?.productVariantsBulkUpdate?.userErrors ?? [];
+      const failedIdx = new Map<number, string>();
+      for (const e of errs) {
+        const idx = Number(e.field?.[1]);
+        failedIdx.set(Number.isFinite(idx) ? idx : -1, e.message);
+      }
+      list.forEach((v, i) => {
+        const o = outcomes.get(v.id)!;
+        const msg = failedIdx.get(i) ?? failedIdx.get(-1);
+        if (msg) {
+          o.status = "error";
+          o.errors.general = msg;
+        } else {
+          o.status = "saved";
+          o.written.push("nspid");
+          audits.push({ shopId: ctx.shopId, actor: ctx.actor, action: "nspid_to_barcodes", variantId: v.id, field: "barcodes", newValue: v.value });
+        }
+      });
+    } catch (e: any) {
+      for (const v of list) {
+        const o = outcomes.get(v.id)!;
+        o.status = "error";
+        o.errors.general = String(e?.message ?? e);
+      }
+    }
+  }
+  if (audits.length) await db.auditLog.createMany({ data: audits });
+  const touched = [...outcomes.values()].filter((o) => o.status === "saved").map((o) => o.variantId);
+  if (touched.length) {
+    const fresh = await fetchNodes(gql, k, touched);
+    await refreshSnapshots(db, ctx.shopId, [...fresh.values()]);
+  }
+  return variantIds.map((id) => outcomes.get(id)!);
 }

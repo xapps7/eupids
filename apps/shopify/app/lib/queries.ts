@@ -1,10 +1,12 @@
-// PRD Section 8 — Admin GraphQL documents. Field names checked against Admin API 2025-10+.
-// Q-01: the multi-value typed barcodes field is not confirmed; we read ProductVariant.barcode only.
+// PRD Section 8 — Admin GraphQL documents. Admin API 2026-10.
+// Q-01 resolved: 2026-10 adds ProductVariant.barcodes (up to 20, optional type). We read both
+// the list and the deprecated single `barcode` (first entry) so older data still works.
 
 export type NspidKey = { namespace: string; key: string };
 
 const VARIANT_FIELDS = (k: NspidKey) => `
   id sku barcode updatedAt title
+  barcodes(first: 20) { nodes { value type } }
   product {
     id title vendor productType status isGiftCard
     featuredMedia { preview { image { url } } }
@@ -54,7 +56,7 @@ query ProductVariants($q: String!, $after: String) {
 export const VARIANTS_BULK_UPDATE = `#graphql
 mutation UpdateVariants($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
   productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-    productVariants { id sku barcode updatedAt }
+    productVariants { id sku updatedAt }
     userErrors { field message code }
   }
 }`;
@@ -103,6 +105,30 @@ export const SAMPLE_VARIANT_METAFIELDS = `#graphql
 query SampleMetafields {
   productVariants(first: 50) {
     nodes { id metafields(first: 25) { nodes { namespace key type value } } }
+  }
+}`;
+
+/**
+ * EU focus: recent orders with country and line items. No names, emails, phones or street
+ * addresses are requested (protected customer data level 1 only). Page size keeps the
+ * query cost under the 1,000-point limit.
+ */
+export const EU_ORDERS = `#graphql
+query EuOrders($q: String!, $after: String) {
+  orders(first: 25, after: $after, query: $q, sortKey: CREATED_AT, reverse: true) {
+    nodes {
+      id name createdAt cancelledAt test
+      shippingAddress { countryCodeV2 }
+      purchasingEntity { __typename }
+      lineItems(first: 30) {
+        nodes {
+          title variantTitle sku quantity
+          variant { id }
+          originalUnitPriceSet { shopMoney { amount currencyCode } }
+        }
+      }
+    }
+    pageInfo { hasNextPage endCursor }
   }
 }`;
 

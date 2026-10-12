@@ -6,6 +6,7 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import prisma from "../db.server";
 import { adminContext, syncPlan } from "../lib/context.server";
 import { filterOptions, listIssues, parseFilters } from "../lib/issues.server";
+import { euFilterOn } from "../lib/eu-orders.server";
 import { enqueue } from "../lib/jobs.server";
 import { checkFixGate, upgradeResponse } from "../lib/gate.server";
 import { JobProgress, RULE_LABEL, SEVERITY_TONE, downloadFile } from "../components/ui";
@@ -16,8 +17,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { shop } = await adminContext(request);
   const url = new URL(request.url);
   const f = parseFilters(url);
+  const euAvailable = euFilterOn(shop);
+  f.eu = euAvailable && url.searchParams.get("scope") !== "all";
   const [list, opts] = await Promise.all([listIssues(prisma, shop.id, f), filterOptions(prisma, shop.id)]);
-  return { ...list, opts, filters: f };
+  return { ...list, opts, filters: f, euAvailable, euOrders: shop.euOrderCount, hasEuData: shop.euSyncStatus === "ok" && shop.euOrderCount > 0 };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -42,7 +45,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 const CODE_OPTIONS = [
-  { value: "", label: "All issue types" },
+  { value: "", label: "All problems" },
   ...Object.entries(RULE_LABEL).map(([value, label]) => ({ value, label: `${label} (${value})` })),
 ];
 
@@ -76,7 +79,7 @@ export default function Issues() {
   const noBarcodeMode = code === "R-SPID-01";
 
   return (
-    <s-page heading="Issues">
+    <s-page heading="Items to fix">
       <s-button slot="primary-action" onClick={() => downloadFile(`/app/issues/export${selected.size ? `?ids=${encodeURIComponent(ids)}` : ""}`, "pid-ready-issues.csv")}>
         Export issues CSV
       </s-button>
@@ -86,6 +89,17 @@ export default function Issues() {
         {fetcher.data?.upgrade && <UpgradePrompt upgrade={fetcher.data.upgrade} />}
         {fetcher.data?.error && <s-banner tone="critical">{fetcher.data.error}</s-banner>}
         {fetcher.data?.jobId && <JobProgress jobId={fetcher.data.jobId} onDone={() => revalidate()} />}
+
+        {data.euAvailable && (
+          <s-stack direction="inline" gap="small" alignItems="center">
+            <s-text color="subdued">
+              {data.filters.eu ? "Showing only items you shipped to the EU in the last 60 days." : "Showing all items."}
+            </s-text>
+            <s-button variant="tertiary" onClick={() => set("scope", data.filters.eu ? "all" : "")}>
+              {data.filters.eu ? "Show all items" : "Show only EU items"}
+            </s-button>
+          </s-stack>
+        )}
 
         <s-section>
           <s-query-container><s-grid gridTemplateColumns="@container (inline-size > 800px) 2fr 1fr 1fr 1fr 1fr, 1fr" gap="small" alignItems="end">
@@ -97,7 +111,7 @@ export default function Issues() {
             >
               <TextField label="Search title, SKU or barcode" value={q} onValue={setQ} placeholder="Press Enter to search" />
             </form>
-            <Select label="Issue type" value={code} onValue={(v) => set("code", v)} options={CODE_OPTIONS} />
+            <Select label="Problem" value={code} onValue={(v) => set("code", v)} options={CODE_OPTIONS} />
             <Select
               label="Severity"
               value={params.get("severity") ?? ""}
@@ -124,7 +138,7 @@ export default function Issues() {
             <s-stack direction="inline" gap="small" alignItems="center">
               <s-text type="strong">{selected.size} selected</s-text>
               {noBarcodeMode && (
-                <s-button variant="primary" onClick={() => setConfirming(true)}>These have no standard barcode</s-button>
+                <s-button variant="primary" onClick={() => setConfirming(true)}>These have no barcode</s-button>
               )}
               <s-button href={`/app/suppliers/new?ids=${encodeURIComponent(ids)}`}>Request from supplier</s-button>
               <s-button variant="tertiary" onClick={() => setSelected(new Set())}>Clear</s-button>
@@ -155,7 +169,7 @@ export default function Issues() {
         <s-section padding="none">
           {data.rows.length === 0 ? (
             <s-box padding="large">
-              <s-heading>{params.toString() ? "No items match these filters" : "No open issues. You’re ready."}</s-heading>
+              <s-heading>{params.toString() ? "No items match these filters" : "Nothing to fix. You’re ready."}</s-heading>
             </s-box>
           ) : (
             <s-table>
@@ -168,7 +182,8 @@ export default function Issues() {
                 <s-table-header>SKU</s-table-header>
                 <s-table-header>Barcode</s-table-header>
                 <s-table-header>Manufacturer code</s-table-header>
-                <s-table-header>Issues</s-table-header>
+                {data.hasEuData && <s-table-header format="numeric">Sold to EU (60 days)</s-table-header>}
+                <s-table-header>Problems</s-table-header>
               </s-table-header-row>
               <s-table-body>
                 {data.rows.map((r) => (
@@ -191,6 +206,7 @@ export default function Issues() {
                       {r.barcodes[0] ? <Mono>{r.barcodes[0]}</Mono> : r.noStandardIdentifier ? <s-badge>None (Y081)</s-badge> : <s-text color="subdued">empty</s-text>}
                     </s-table-cell>
                     <s-table-cell>{r.nspid ? <Mono>{r.nspid}</Mono> : <s-text color="subdued">empty</s-text>}</s-table-cell>
+                    {data.hasEuData && <s-table-cell>{r.euUnits ?? 0}</s-table-cell>}
                     <s-table-cell>
                       <s-stack direction="inline" gap="small-300">
                         {r.issues.map((i) => (

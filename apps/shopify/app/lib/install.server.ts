@@ -3,7 +3,7 @@ import type { PrismaClient } from "@prisma/client";
 import type { Gql } from "./gql.server";
 import { getShop, EU_COUNTRIES } from "./shop.server";
 import { ensureDefinitions } from "./metafields.server";
-import { startScan } from "./scan.server";
+import { queueEuSync, startScan } from "./scan.server";
 import { SHOP_INFO } from "./queries";
 import { log } from "./log.server";
 
@@ -29,6 +29,9 @@ export async function onInstalled(db: PrismaClient, domain: string, gql: Gql) {
   const anyScan = await db.scan.findFirst({ where: { shopId: shop.id } });
   if (!anyScan || reinstall) {
     await startScan(db, gql, shop.id);
+  } else if (shop.euSyncStatus !== "ok") {
+    // Existing shop opening the app after approving new scopes: try the EU view again.
+    await queueEuSync(db, shop.id);
   }
   return shop;
 }

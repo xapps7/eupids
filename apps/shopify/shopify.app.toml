@@ -7,11 +7,11 @@ embedded = true
 
 [build]
 automatically_update_urls_on_dev = false
-include_config_on_deploy = true
 
 [access_scopes]
-# Section 8: minimum scopes. No orders, no customers.
-scopes = "read_products,write_products,read_inventory,write_inventory"
+# read_orders: country + line items of the last 60 days, to show only items shipped to the EU.
+# No customer names, emails, phones or addresses are read.
+scopes = "read_products,write_products,read_inventory,write_inventory,read_orders"
 
 [auth]
 redirect_urls = [

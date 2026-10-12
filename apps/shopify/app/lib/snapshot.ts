@@ -5,6 +5,8 @@ export type VariantNode = {
   id: string;
   sku?: string | null;
   barcode?: string | null;
+  /** Admin API 2026-10. In bulk results the entries arrive as child lines and are attached here. */
+  barcodes?: { nodes: BarcodeEntry[] } | null;
   updatedAt: string;
   title?: string | null;
   product: {
@@ -26,6 +28,55 @@ export type VariantNode = {
   noStd?: { value?: string | null } | null;
 };
 
+export type BarcodeEntry = { value: string; type?: string | null };
+
+const STANDARD_TYPES = new Set(["UPC", "EAN", "GTIN", "ISBN"]);
+
+/**
+ * Split a variant's barcodes into standard barcodes (S-PID candidates) and other codes.
+ * Rules, in order:
+ *  - typed UPC/EAN/GTIN/ISBN → standard; typed ASIN → ignored (an Amazon id, not for customs)
+ *  - an untyped entry equal to the stored manufacturer code → the manufacturer code (Zonos/Passport
+ *    ask merchants to keep it as a barcode)
+ *  - the first remaining entry → standard (that is what Shopify's single `barcode` field shows,
+ *    so a wrong value there is still reported as a barcode problem)
+ *  - later untyped entries: all digits → standard; otherwise → other (a manufacturer-code candidate)
+ */
+export function splitBarcodes(list: BarcodeEntry[], metafieldNspid: string | null) {
+  const standard: string[] = [];
+  const other: string[] = [];
+  let nspidInBarcodes = false;
+  let first = true;
+  for (const b of list) {
+    const v = (b.value ?? "").trim();
+    if (!v) continue;
+    const t = b.type ? String(b.type).toUpperCase() : null;
+    if (t === "ASIN") continue;
+    if (t && STANDARD_TYPES.has(t)) {
+      standard.push(v);
+      first = false;
+      continue;
+    }
+    if (metafieldNspid && v === metafieldNspid) {
+      nspidInBarcodes = true;
+      continue;
+    }
+    if (first) {
+      standard.push(v);
+      first = false;
+      continue;
+    }
+    if (/^[\d\s-]+$/.test(v)) standard.push(v);
+    else other.push(v);
+  }
+  return { standard, other, nspidInBarcodes };
+}
+
+export function barcodeList(n: Pick<VariantNode, "barcode" | "barcodes">): BarcodeEntry[] {
+  if (n.barcodes?.nodes?.length) return n.barcodes.nodes;
+  return n.barcode ? [{ value: n.barcode, type: null }] : [];
+}
+
 export type SnapshotRow = {
   shopId: string;
   variantId: string;
@@ -41,6 +92,7 @@ export type SnapshotRow = {
   barcodes: string[];
   nspid: string | null;
   noStandardIdentifier: boolean;
+  nspidInBarcodes: boolean;
   hsCode: string | null;
   countryOfOrigin: string | null;
   imageUrl: string | null;
@@ -53,6 +105,10 @@ export type SnapshotRow = {
 };
 
 export function nodeToSnapshot(shopId: string, n: VariantNode, scanId: string | null): SnapshotRow {
+  const metaNspid = n.nspid?.value?.trim() || null;
+  const split = splitBarcodes(barcodeList(n), metaNspid);
+  // No metafield, but an extra non-barcode code sits in the barcode list: treat it as the manufacturer code.
+  const nspid = metaNspid ?? split.other[0] ?? null;
   return {
     shopId,
     variantId: n.id,
@@ -65,9 +121,10 @@ export function nodeToSnapshot(shopId: string, n: VariantNode, scanId: string | 
     requiresShipping: n.inventoryItem?.requiresShipping ?? true,
     isGiftCard: !!n.product.isGiftCard,
     sku: n.sku ?? null,
-    barcodes: n.barcode ? [n.barcode] : [],
-    nspid: n.nspid?.value ?? null,
+    barcodes: split.standard,
+    nspid,
     noStandardIdentifier: n.noStd?.value === "true",
+    nspidInBarcodes: split.nspidInBarcodes || (!metaNspid && !!nspid),
     hsCode: n.inventoryItem?.harmonizedSystemCode ?? null,
     countryOfOrigin: n.inventoryItem?.countryCodeOfOrigin ?? null,
     imageUrl: n.product.featuredMedia?.preview?.image?.url ?? null,

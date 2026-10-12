@@ -26,9 +26,9 @@ const billing = Object.fromEntries(
 const shopify = shopifyApp({
   apiKey: process.env.SHOPIFY_API_KEY,
   apiSecretKey: process.env.SHOPIFY_API_SECRET || "",
-  // PRD §8 asks for the latest stable version (2026-10 from 1 Oct 2026). The
-  // library currently ships up to 2026-07; bump when it adds October26.
-  apiVersion: ApiVersion.July26,
+  // PRD §8: latest stable version. The installed library's enum stops at 2026-07, but it
+  // accepts any version string; 2026-10 is needed for ProductVariant.barcodes.
+  apiVersion: "2026-10" as ApiVersion,
   scopes: process.env.SCOPES?.split(","),
   appUrl: process.env.SHOPIFY_APP_URL || "",
   authPathPrefix: "/auth",
@@ -50,7 +50,7 @@ const shopify = shopifyApp({
 });
 
 export default shopify;
-export const apiVersion = ApiVersion.July26;
+export const apiVersion = "2026-10" as ApiVersion;
 export const addDocumentResponseHeaders = shopify.addDocumentResponseHeaders;
 export const authenticate = shopify.authenticate;
 export const unauthenticated = shopify.unauthenticated;

@@ -5,14 +5,14 @@ import type { SnapshotRow } from "./snapshot";
 
 const COLS = [
   "shopId", "variantId", "productId", "productTitle", "variantTitle", "vendor", "productType", "status",
-  "requiresShipping", "isGiftCard", "sku", "barcodes", "nspid", "noStandardIdentifier", "hsCode",
+  "requiresShipping", "isGiftCard", "sku", "barcodes", "nspid", "noStandardIdentifier", "nspidInBarcodes", "hsCode",
   "countryOfOrigin", "imageUrl", "inventoryItemId", "collectionIds", "updatedAt", "scanId", "inScope", "ready",
 ] as const;
 
 /** Columns refreshed from Shopify on conflict. inScope/ready are left to the evaluator. */
 const UPDATE = COLS.filter((c) => !["shopId", "variantId", "inScope", "ready"].includes(c));
 
-// 23 params per row; Postgres allows 32,767 per statement.
+// 24 params per row; Postgres allows 32,767 per statement.
 const CHUNK = 1000;
 
 export async function upsertSnapshots(db: PrismaClient | Prisma.TransactionClient, rows: SnapshotRow[], opts: { keepScanId?: boolean } = {}) {

@@ -4,7 +4,7 @@
 import prisma from "../db.server";
 import { gqlForShop as offlineGql } from "./context.server";
 import { claimJobs, requeueStale, runJob } from "./jobs.server";
-import { pollScan } from "./scan.server";
+import { pollScan, queueEuSync } from "./scan.server";
 import { log } from "./log.server";
 
 declare global {
@@ -47,6 +47,20 @@ async function tick() {
           .then((gql) => pollScan(prisma, gql, s.shopId))
           .catch((e) => log.warn("scan_poll_failed", { shopId: s.shopId, err: String(e) }));
       }
+    }
+
+    // EU orders: refresh once a day per active shop (every ~30 min we check who is due).
+    if (ticks % 900 === 450) {
+      const due = await prisma.shop.findMany({
+        where: {
+          active: true,
+          euSyncStatus: { in: ["ok", "failed"] },
+          OR: [{ euSyncedAt: null }, { euSyncedAt: { lt: new Date(Date.now() - 86_400_000) } }],
+        },
+        select: { id: true },
+        take: 50,
+      });
+      for (const s of due) await queueEuSync(prisma, s.id);
     }
 
     // Webhook idempotency rows: purge after 7 days.

@@ -98,30 +98,35 @@ export async function reevaluateShop(
   return { inScope: result.inScope, ready: result.ready, opened: toCreate.length, resolved: toResolve.length, regressed };
 }
 
-/** UC-02 / AT-03: dashboard numbers come from the issues table and snapshots, so they match to the unit. */
-export async function dashboardSummary(db: PrismaClient, shopId: string) {
-  const [inScope, ready, outOfScope, open, snaps] = await Promise.all([
-    db.variantSnapshot.count({ where: { shopId, inScope: true } }),
-    db.variantSnapshot.count({ where: { shopId, inScope: true, ready: true } }),
-    db.variantSnapshot.count({ where: { shopId, inScope: false } }),
+/**
+ * UC-02 / AT-03: dashboard numbers come from the issues table and snapshots, so they match to the unit.
+ * With `only` (EU focus), counts cover just those variants: the ones shipped to EU shoppers.
+ */
+export async function dashboardSummary(db: PrismaClient, shopId: string, only?: Set<string> | null) {
+  const [snaps, open, outOfScopeAll] = await Promise.all([
+    db.variantSnapshot.findMany({ where: { shopId, inScope: true }, select: { variantId: true, vendor: true, ready: true } }),
     db.issue.findMany({
       where: { shopId, status: "open" },
       select: { variantId: true, ruleCode: true, severity: true, message: true },
     }),
-    db.variantSnapshot.findMany({ where: { shopId, inScope: true }, select: { variantId: true, vendor: true } }),
+    db.variantSnapshot.count({ where: { shopId, inScope: false } }),
   ]);
-  const vendor = new Map(snaps.map((s) => [s.variantId, s.vendor]));
+  const keep = (id: string) => !only || only.has(id);
+  const scoped = snaps.filter((s) => keep(s.variantId));
+  const vendor = new Map(scoped.map((s) => [s.variantId, s.vendor]));
   const pseudo: EvaluateResult = {
-    inScope,
-    ready,
-    outOfScope,
+    inScope: scoped.length,
+    ready: scoped.filter((s) => s.ready).length,
+    outOfScope: only ? 0 : outOfScopeAll,
     results: [],
-    issues: open.map((o) => ({
-      variantId: o.variantId,
-      code: o.ruleCode as EngineIssue["code"],
-      severity: o.severity as EngineIssue["severity"],
-      message: o.message,
-    })),
+    issues: open
+      .filter((o) => vendor.has(o.variantId))
+      .map((o) => ({
+        variantId: o.variantId,
+        code: o.ruleCode as EngineIssue["code"],
+        severity: o.severity as EngineIssue["severity"],
+        message: o.message,
+      })),
   };
   return summarize(pseudo, (id) => vendor.get(id) ?? "");
 }

@@ -166,3 +166,45 @@ export async function readinessReportCsv(db: PrismaClient, shopId: string, now =
   }
   return toCsv(rows);
 }
+
+export type CustomsFormat = "standard" | "shipping_app";
+
+/**
+ * The file a carrier, broker or shipping app needs: one row per variant with the three
+ * identifiers as they go on the EU customs declaration (document codes C127 / C128 / C129,
+ * exception Y081), plus HS code and origin. `only` limits it to EU-shipped variants.
+ */
+export async function customsFileCsv(db: PrismaClient, shopId: string, opts: { format: CustomsFormat; only?: Set<string> | null }, now = new Date()) {
+  const [snaps, settings, demand] = await Promise.all([
+    db.variantSnapshot.findMany({ where: { shopId }, orderBy: [{ vendor: "asc" }, { productTitle: "asc" }, { variantTitle: "asc" }] }),
+    db.settings.findUnique({ where: { shopId } }),
+    db.euDemand.findMany({ where: { shopId }, select: { variantId: true, units: true } }),
+  ]);
+  const units = new Map(demand.map((d) => [d.variantId, d.units]));
+  const r = evaluate(snaps.map(snapshotToInput), toRuleSettings(settings));
+  const byId = new Map(r.results.map((x) => [x.variantId, x]));
+  const rows: (string | number)[][] =
+    opts.format === "shipping_app"
+      ? [["sku", "product_title", "variant_title", "m_pid", "ns_pid", "s_pid", "s_pid_exception", "hs_code", "country_of_origin", "ready"]]
+      : [
+          [DISCLAIMER_LINE(now)],
+          [
+            "Product", "Variant", "SKU (M-PID, code C127)", "Manufacturer code (NS-PID, code C128)", "Barcode (S-PID, code C129)",
+            "No barcode (exception Y081)", "HS code", "Country of origin", "Units shipped to EU (60 days)", "Ready",
+          ],
+        ];
+  for (const s of snaps) {
+    const res = byId.get(s.variantId);
+    if (!res?.inScope) continue;
+    if (opts.only && !opts.only.has(s.variantId)) continue;
+    const spid = res.spid ?? "";
+    const exc = res.spidException ?? "";
+    const ready = res.ready ? "yes" : "no";
+    if (opts.format === "shipping_app") {
+      rows.push([s.sku ?? "", s.productTitle, s.variantTitle, s.sku ?? "", s.nspid ?? "", spid, exc, s.hsCode ?? "", s.countryOfOrigin ?? "", ready]);
+    } else {
+      rows.push([s.productTitle, s.variantTitle, s.sku ?? "", s.nspid ?? "", spid, exc, s.hsCode ?? "", s.countryOfOrigin ?? "", units.get(s.variantId) ?? 0, ready]);
+    }
+  }
+  return toCsv(rows);
+}
