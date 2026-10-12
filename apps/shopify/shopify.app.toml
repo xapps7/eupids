@@ -2,7 +2,7 @@
 # Deploy config to Shopify: npx shopify app deploy (from apps/shopify)
 client_id = "14e4b73d7eb1e9959406e22419c06133"
 name = "PID Ready"
-application_url = "https://3-151-142-171.sslip.io"
+application_url = "https://pid.revguardlabs.com"
 embedded = true
 
 [build]
@@ -15,9 +15,9 @@ scopes = "read_products,write_products,read_inventory,write_inventory"
 
 [auth]
 redirect_urls = [
-  "https://3-151-142-171.sslip.io/auth/callback",
-  "https://3-151-142-171.sslip.io/auth/shopify/callback",
-  "https://3-151-142-171.sslip.io/api/auth/callback"
+  "https://pid.revguardlabs.com/auth/callback",
+  "https://pid.revguardlabs.com/auth/shopify/callback",
+  "https://pid.revguardlabs.com/api/auth/callback"
 ]
 
 [webhooks]
