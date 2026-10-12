@@ -21,13 +21,14 @@ docker run -d --name app --network pid --restart always \
   --log-opt max-size=20m --log-opt max-file=3 \
   pidready:latest
 
+T=$(curl -sX PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
+IP=$(curl -s -H "X-aws-ec2-metadata-token: $T" http://169.254.169.254/latest/meta-data/public-ipv4)
+FALLBACK="$(echo "$IP" | tr . -).sslip.io"
 HOST=$(grep '^APP_HOST=' app.env | cut -d= -f2- || true)
-if [ -z "$HOST" ]; then
-  T=$(curl -sX PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
-  IP=$(curl -s -H "X-aws-ec2-metadata-token: $T" http://169.254.169.254/latest/meta-data/public-ipv4)
-  HOST="$(echo "$IP" | tr . -).sslip.io"
-fi
-printf '%s {\n  encode gzip\n  reverse_proxy app:3000\n}\n' "$HOST" > Caddyfile
+# Serve the custom domain and keep the sslip.io address working as a fallback.
+SITES="$FALLBACK"
+if [ -n "$HOST" ] && [ "$HOST" != "$FALLBACK" ]; then SITES="$HOST, $FALLBACK"; fi
+printf '%s {\n  encode gzip\n  reverse_proxy app:3000\n}\n' "$SITES" > Caddyfile
 if docker inspect caddy >/dev/null 2>&1; then
   docker restart caddy
 else
@@ -36,7 +37,7 @@ else
 fi
 docker image prune -f >/dev/null
 for i in $(seq 1 30); do
-  if docker exec app wget -qO- http://127.0.0.1:3000/healthz >/dev/null 2>&1; then echo "DEPLOY OK https://$HOST"; exit 0; fi
+  if docker exec app wget -qO- http://127.0.0.1:3000/healthz >/dev/null 2>&1; then echo "DEPLOY OK https://${HOST:-$FALLBACK}"; exit 0; fi
   sleep 4
 done
 echo "App did not become healthy. Last logs:"; docker logs --tail 60 app; exit 1
