@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "target": "ES2020", "module": "ESNext", "moduleResolution": "Bundler",
+    "lib": ["ES2020"], "types": [],
+    "strict": true, "declaration": true, "outDir": "dist", "rootDir": "src",
+    "noUncheckedIndexedAccess": true, "skipLibCheck": true
+  },
+  "include": ["src"]
+}

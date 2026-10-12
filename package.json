@@ -1,0 +1,10 @@
+{
+  "name": "pid-ready",
+  "private": true,
+  "workspaces": ["packages/*", "apps/*"],
+  "scripts": {
+    "test": "npm run test -w @pidready/rules",
+    "build": "npm run build -w @pidready/rules && npm run build -w @pidready/checker",
+    "dev:checker": "npm run dev -w @pidready/checker"
+  }
+}

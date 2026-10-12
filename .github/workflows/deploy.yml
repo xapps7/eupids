@@ -1,0 +1,48 @@
+name: Deploy to AWS
+# On every push to main: package the repo, upload it to the private release bucket,
+# and tell the EC2 server (via SSM) to build and restart. No AWS keys are stored:
+# GitHub signs in to a role that can only do exactly this.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::115576797583:role/pidready-github-deploy
+          aws-region: us-east-2
+      - name: Upload source
+        run: |
+          git archive --format=tar.gz --prefix=pidready/ -o pidready.tar.gz HEAD
+          BUCKET=$(aws ssm get-parameter --name /pidready-infra/BUCKET --query Parameter.Value --output text)
+          aws s3 cp pidready.tar.gz "s3://$BUCKET/pidready.tar.gz" --only-show-errors
+          echo "BUCKET=$BUCKET" >> "$GITHUB_ENV"
+      - name: Build and restart on the server
+        run: |
+          IID=$(aws ec2 describe-instances --filters Name=tag:Name,Values=pidready Name=instance-state-name,Values=running --query 'Reservations[0].Instances[0].InstanceId' --output text)
+          CMD=$(aws ssm send-command --instance-ids "$IID" --document-name AWS-RunShellScript --timeout-seconds 1800 \
+            --parameters "commands=[\"set -e\",\"cd /opt/pidready\",\"aws s3 cp s3://$BUCKET/pidready.tar.gz src.tgz --region us-east-2 --only-show-errors\",\"rm -rf src && mkdir src && tar xzf src.tgz -C src --strip-components=1\",\"bash src/infra/deploy.sh\"]" \
+            --query Command.CommandId --output text)
+          echo "SSM command $CMD on $IID"
+          for i in $(seq 1 180); do
+            S=$(aws ssm get-command-invocation --command-id "$CMD" --instance-id "$IID" --query Status --output text 2>/dev/null || echo Pending)
+            case "$S" in Success|Failed|Cancelled|TimedOut) break;; esac
+            sleep 10
+          done
+          aws ssm get-command-invocation --command-id "$CMD" --instance-id "$IID" --query StandardOutputContent --output text | tail -30
+          aws ssm get-command-invocation --command-id "$CMD" --instance-id "$IID" --query StandardErrorContent --output text | tail -30
+          test "$S" = "Success"

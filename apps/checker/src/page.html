@@ -1,0 +1,269 @@
+<title>PID Ready Checker</title>
+<meta name="description" content="Check your Shopify product export for the EU customs product identifiers required from 1 November 2026. Free. Your file stays in your browser.">
+<style>
+:root {
+  --ground: #eef1f4;
+  --surface: #ffffff;
+  --ink: #15202b;
+  --muted: #5a6573;
+  --line: #d6dce3;
+  --accent: #2446c9;
+  --accent-ink: #ffffff;
+  --accent-soft: #e4e9fb;
+  --ok: #1d7a4a;
+  --ok-soft: #e1f2e8;
+  --warn: #9a5b00;
+  --warn-soft: #fbefd9;
+  --bad: #b3261e;
+  --bad-soft: #f9e2e0;
+  --info: #3d5a80;
+  --info-soft: #e3eaf3;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #0e1319; --surface: #161d25; --ink: #e5eaf0; --muted: #98a3b0; --line: #2a3440;
+    --accent: #7d97ff; --accent-ink: #0e1319; --accent-soft: #1f2a4d;
+    --ok: #5cc58f; --ok-soft: #173326; --warn: #e5a54a; --warn-soft: #3a2a12;
+    --bad: #f08a80; --bad-soft: #3d1c1a; --info: #9fb6d6; --info-soft: #1d2836;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #0e1319; --surface: #161d25; --ink: #e5eaf0; --muted: #98a3b0; --line: #2a3440;
+  --accent: #7d97ff; --accent-ink: #0e1319; --accent-soft: #1f2a4d;
+  --ok: #5cc58f; --ok-soft: #173326; --warn: #e5a54a; --warn-soft: #3a2a12;
+  --bad: #f08a80; --bad-soft: #3d1c1a; --info: #9fb6d6; --info-soft: #1d2836;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--ground); color: var(--ink); font: 15px/1.55 var(--sans); }
+.wrap { max-width: 1120px; margin: 0 auto; padding-inline: 20px; }
+h1, h2, h3 { text-wrap: balance; margin: 0; }
+code { font-family: var(--mono); font-size: 0.88em; }
+.num { font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+
+/* top bar */
+.bar { border-bottom: 1px solid var(--line); background: var(--surface); }
+.bar .wrap { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-block: 12px; flex-wrap: wrap; }
+.brand { display: flex; align-items: baseline; gap: 10px; }
+.brand b { font-size: 17px; letter-spacing: -0.01em; }
+.brand b i { font-style: normal; color: var(--accent); }
+.brand span { color: var(--muted); font-size: 13px; }
+.countdown { font: 600 12px/1 var(--mono); letter-spacing: 0.04em; text-transform: uppercase; border: 1.5px solid var(--accent); color: var(--accent); padding: 6px 9px; border-radius: 3px; transform: rotate(-1.5deg); }
+
+/* hero */
+.hero { display: grid; grid-template-columns: 1.1fr 1fr; gap: 36px; padding-block: 44px 28px; align-items: start; }
+.hero h1 { font-size: clamp(28px, 4vw, 40px); line-height: 1.12; letter-spacing: -0.02em; }
+.hero p { color: var(--muted); max-width: 58ch; margin: 14px 0 0; }
+.ids { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; margin-top: 22px; border: 1px solid var(--line); background: var(--surface); }
+.ids div { padding: 10px 12px; border-right: 1px solid var(--line); }
+.ids div:last-child { border-right: 0; }
+.ids small { display: block; font: 600 11px/1.2 var(--mono); letter-spacing: 0.06em; color: var(--accent); }
+.ids span { font-size: 13px; }
+.drop { background: var(--surface); border: 2px dashed var(--line); border-radius: 10px; padding: 28px 22px; display: grid; gap: 12px; justify-items: center; text-align: center; transition: border-color .15s, background .15s; }
+.drop.over { border-color: var(--accent); background: var(--accent-soft); }
+.drop h2 { font-size: 18px; }
+.drop p { margin: 0; color: var(--muted); font-size: 13px; max-width: 42ch; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; font: 600 14px/1 var(--sans); padding: 11px 16px; border-radius: 6px; border: 1px solid transparent; cursor: pointer; text-decoration: none; }
+.btn-primary { background: var(--accent); color: var(--accent-ink); }
+.btn-ghost { background: transparent; color: var(--ink); border-color: var(--line); }
+.btn:focus-visible, select:focus-visible, input:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.file-input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.lock { font-size: 12px; color: var(--ok); display: flex; gap: 6px; align-items: center; }
+.howto { font-size: 12px; color: var(--muted); }
+.howto code { background: var(--ground); padding: 1px 4px; border-radius: 3px; }
+.error { background: var(--bad-soft); color: var(--bad); padding: 10px 12px; border-radius: 6px; font-size: 14px; width: 100%; text-align: left; }
+
+/* mapping */
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
+.mapping { margin-bottom: 24px; display: grid; gap: 14px; }
+.map-row { display: grid; grid-template-columns: 160px 1fr; gap: 12px; align-items: center; }
+select { font: inherit; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); max-width: 100%; }
+
+/* results */
+.results { display: grid; gap: 20px; padding-bottom: 40px; }
+.results > *, .hero > *, .top > *, .two > * { min-width: 0; }
+.source { font-size: 14px; color: var(--muted); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.tag { font: 600 11px/1 var(--mono); letter-spacing: 0.05em; text-transform: uppercase; padding: 5px 7px; border-radius: 3px; background: var(--warn-soft); color: var(--warn); }
+.tag-file { background: var(--accent-soft); color: var(--accent); }
+.top { display: grid; grid-template-columns: 300px 1fr; gap: 20px; }
+.score-card h3, .section-h { font: 600 12px/1 var(--mono); letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); }
+.score { font-size: 64px; font-weight: 700; letter-spacing: -0.03em; line-height: 1; margin: 14px 0 12px; font-variant-numeric: tabular-nums; }
+.score-bar { height: 8px; border-radius: 4px; background: var(--ground); overflow: hidden; }
+.score-bar::after { content: ""; display: block; height: 100%; width: var(--pct, 0%); background: var(--bad); transition: width .4s ease; }
+.score-bar[data-band="mid"]::after { background: var(--warn); }
+.score-bar[data-band="good"]::after { background: var(--ok); }
+.score-note { font-size: 13px; color: var(--muted); margin: 12px 0 0; }
+.idgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); overflow: hidden; }
+.idbox { padding: 18px; border-right: 1px solid var(--line); display: grid; gap: 10px; align-content: start; }
+.idbox:last-child { border-right: 0; }
+.idbox header small { font: 600 11px/1 var(--mono); letter-spacing: 0.06em; color: var(--accent); }
+.idbox header h4 { margin: 4px 0 0; font-size: 15px; }
+.idbox header p { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
+.stack { display: grid; height: 6px; border-radius: 3px; overflow: hidden; gap: 0; background: var(--ground); }
+.stack i:nth-child(1) { background: var(--ok); }
+.stack i:nth-child(2) { background: var(--warn); }
+.stack i:nth-child(3) { background: var(--bad); }
+.counts { display: grid; gap: 4px; font-size: 13px; }
+.counts div { display: flex; justify-content: space-between; }
+.counts b { font-variant-numeric: tabular-nums; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.notes { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.notes li { font-size: 14px; background: var(--info-soft); color: var(--ink); padding: 10px 12px; border-radius: 6px; }
+.two { display: grid; grid-template-columns: 1fr 1.6fr; gap: 20px; }
+.list { list-style: none; margin: 12px 0 0; padding: 0; display: grid; }
+.list li { display: flex; gap: 10px; align-items: baseline; justify-content: space-between; padding: 9px 0; border-top: 1px solid var(--line); font-size: 14px; }
+.list li:first-child { border-top: 0; }
+.rule-msg { flex: 1; }
+.sev { font: 600 10px/1 var(--mono); text-transform: uppercase; letter-spacing: 0.05em; padding: 4px 6px; border-radius: 3px; flex: none; width: 64px; text-align: center; }
+.sev-error { background: var(--bad-soft); color: var(--bad); }
+.sev-warning { background: var(--warn-soft); color: var(--warn); }
+.sev-info { background: var(--info-soft); color: var(--info); }
+.table-wrap { overflow-x: auto; margin-top: 12px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 820px; }
+th { text-align: left; font: 600 11px/1 var(--mono); letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); padding: 10px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { padding: 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+td code { background: var(--ground); padding: 2px 5px; border-radius: 3px; word-break: break-all; }
+.blank { color: var(--muted); font-style: italic; }
+.p-title { font-weight: 600; }
+.p-sub { color: var(--muted); font-size: 12px; }
+.chips > div { display: flex; flex-wrap: wrap; gap: 6px; max-width: 360px; }
+.chip { padding: 3px 7px; border-radius: 4px; font-size: 12px; line-height: 1.35; }
+.chip-error { background: var(--bad-soft); color: var(--bad); }
+.chip-warning { background: var(--warn-soft); color: var(--warn); }
+.chip-info { background: var(--info-soft); color: var(--info); }
+.cta { display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap; background: var(--ink); color: var(--ground); border-radius: 10px; padding: 24px; }
+.cta h3 { font-size: 22px; }
+.cta p { margin: 6px 0 0; max-width: 60ch; opacity: 0.8; font-size: 14px; }
+.cta .btn-primary { background: var(--ground); color: var(--ink); }
+footer { border-top: 1px solid var(--line); padding-block: 18px 28px; font-size: 13px; color: var(--muted); }
+footer .wrap { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+
+@media (max-width: 860px) {
+  .hero, .top, .two { grid-template-columns: 1fr; }
+  .hero { padding-block: 28px 20px; gap: 24px; }
+}
+@media (max-width: 560px) {
+  .wrap { padding-inline: 16px; }
+  .idgrid, .ids { grid-template-columns: 1fr; }
+  .idbox, .ids div { border-right: 0; border-bottom: 1px solid var(--line); }
+  .idbox:last-child, .ids div:last-child { border-bottom: 0; }
+  .map-row { grid-template-columns: 1fr; }
+  .score { font-size: 52px; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="bar"><div class="wrap">
+  <div class="brand"><b>PID <i>Ready</i></b><span>Free EU product ID checker</span></div>
+  <div class="countdown" id="countdown">1 Nov 2026</div>
+</div></div>
+
+<main class="wrap">
+  <section class="hero">
+    <div>
+      <h1>Will your parcels clear EU customs on 1 November?</h1>
+      <p>From 1 November 2026, every item you ship to an EU shopper needs three product IDs on the customs declaration. Missing or wrong IDs can get the parcel held. Drop your Shopify product export to see your gap in seconds.</p>
+      <div class="ids" aria-label="The three identifiers">
+        <div><small>M-PID</small><span>Your SKU</span></div>
+        <div><small>NS-PID</small><span>Manufacturer code</span></div>
+        <div><small>S-PID</small><span>Barcode (GTIN/EAN/UPC)</span></div>
+      </div>
+    </div>
+    <label class="drop" id="drop" for="file">
+      <h2>Drop your Shopify product CSV</h2>
+      <p class="howto">In Shopify admin: <code>Products</code> → <code>Export</code> → <code>All products</code> → <code>CSV for Excel, Numbers…</code></p>
+      <span class="btn btn-primary">Choose file</span>
+      <input class="file-input" type="file" id="file" accept=".csv,text/csv">
+      <button type="button" class="btn btn-ghost" id="sample">Show the example again</button>
+      <span class="lock">🔒 Your file stays in this browser. Nothing is uploaded.</span>
+      <div class="error" id="error" role="alert" hidden></div>
+    </label>
+  </section>
+
+  <section class="panel mapping" id="mapping" hidden>
+    <h3>Match your columns</h3>
+    <p class="muted" style="margin:0">We couldn’t find some columns, maybe because the headers are in another language. Pick the matching column for each.</p>
+    <div id="mapping-fields" style="display:grid;gap:10px"></div>
+    <div><button type="button" class="btn btn-primary" id="map-apply">Check file</button></div>
+  </section>
+
+  <section class="results" id="results" hidden>
+    <div class="source" id="source"></div>
+    <div class="top">
+      <div class="panel score-card">
+        <h3>Readiness score</h3>
+        <div class="score" id="score">—</div>
+        <div class="score-bar" id="score-bar"></div>
+        <p class="score-note" id="score-note"></p>
+      </div>
+      <div class="idgrid">
+        <div class="idbox" id="id-mpid">
+          <header><small>M-PID</small><h4>Your SKU</h4><p>Must exist and be unique</p></header>
+          <div class="stack"><i></i><i></i><i></i></div>
+          <div class="counts">
+            <div><span><i class="dot" style="background:var(--ok)"></i>OK</span><b class="n-ok">0</b></div>
+            <div><span><i class="dot" style="background:var(--warn)"></i>Duplicate</span><b class="n-invalid">0</b></div>
+            <div><span><i class="dot" style="background:var(--bad)"></i>Missing</span><b class="n-missing">0</b></div>
+          </div>
+        </div>
+        <div class="idbox" id="id-nspid">
+          <header><small>NS-PID</small><h4>Manufacturer code</h4><p>The maker’s model or part number</p></header>
+          <div class="stack"><i></i><i></i><i></i></div>
+          <div class="counts">
+            <div><span><i class="dot" style="background:var(--ok)"></i>OK</span><b class="n-ok">0</b></div>
+            <div><span><i class="dot" style="background:var(--warn)"></i>Invalid</span><b class="n-invalid">0</b></div>
+            <div><span><i class="dot" style="background:var(--bad)"></i>Missing</span><b class="n-missing">0</b></div>
+          </div>
+        </div>
+        <div class="idbox" id="id-spid">
+          <header><small>S-PID</small><h4>Barcode</h4><p>GTIN, EAN, UPC or ISBN, if one exists</p></header>
+          <div class="stack"><i></i><i></i><i></i></div>
+          <div class="counts">
+            <div><span><i class="dot" style="background:var(--ok)"></i>OK</span><b class="n-ok">0</b></div>
+            <div><span><i class="dot" style="background:var(--warn)"></i>Invalid</span><b class="n-invalid">0</b></div>
+            <div><span><i class="dot" style="background:var(--bad)"></i>Missing</span><b class="n-missing">0</b></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <ul class="notes" id="notes"></ul>
+
+    <div class="two">
+      <div class="panel">
+        <h3 class="section-h">Vendors missing manufacturer codes</h3>
+        <ul class="list" id="vendors"></ul>
+      </div>
+      <div class="panel">
+        <h3 class="section-h">Issues by type (variants affected)</h3>
+        <ul class="list" id="rules"></ul>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3 class="section-h" id="table-caption">Variants with issues</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Product</th><th>SKU</th><th>Manufacturer code</th><th>Barcode</th><th>What to fix</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="cta">
+      <div><h3 id="cta-title">Install to fix every issue</h3><p id="cta-body"></p></div>
+      <a class="btn btn-primary" id="cta-link" href="#" target="_blank" rel="noopener">Get PID Ready for Shopify</a>
+    </div>
+  </section>
+</main>
+
+<footer><div class="wrap">
+  <span id="disclaimer">PID Ready checks your data. It is not legal or customs advice.</span>
+  <span>Your file is read in this browser only.</span>
+</div></footer>

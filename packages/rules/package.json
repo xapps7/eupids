@@ -1,0 +1,23 @@
+{
+  "name": "@pidready/rules",
+  "version": "0.1.0",
+  "description": "PID Ready rule engine: EU customs product identifier checks (PRD Section 9). No Shopify or DOM dependency (FR-01).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "tsx": "^4.19.0"
+  }
+}

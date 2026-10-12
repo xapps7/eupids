@@ -1,0 +1,51 @@
+# PID Ready — Shopify app configuration.
+# Deploy config to Shopify: npx shopify app deploy (from apps/shopify)
+client_id = "14e4b73d7eb1e9959406e22419c06133"
+name = "PID Ready"
+application_url = "https://3-151-142-171.sslip.io"
+embedded = true
+
+[build]
+automatically_update_urls_on_dev = false
+include_config_on_deploy = true
+
+[access_scopes]
+# Section 8: minimum scopes. No orders, no customers.
+scopes = "read_products,write_products,read_inventory,write_inventory"
+
+[auth]
+redirect_urls = [
+  "https://3-151-142-171.sslip.io/auth/callback",
+  "https://3-151-142-171.sslip.io/auth/shopify/callback",
+  "https://3-151-142-171.sslip.io/api/auth/callback"
+]
+
+[webhooks]
+api_version = "2026-10"
+
+  [[webhooks.subscriptions]]
+  topics = ["products/create", "products/update"]
+  uri = "/webhooks/products"
+
+  [[webhooks.subscriptions]]
+  topics = ["bulk_operations/finish"]
+  uri = "/webhooks/bulk_operations/finish"
+
+  [[webhooks.subscriptions]]
+  topics = ["app/uninstalled"]
+  uri = "/webhooks/app/uninstalled"
+
+  [[webhooks.subscriptions]]
+  topics = ["app/scopes_update"]
+  uri = "/webhooks/app/scopes_update"
+
+  [[webhooks.subscriptions]]
+  topics = ["app_subscriptions/update"]
+  uri = "/webhooks/app_subscriptions/update"
+
+  [[webhooks.subscriptions]]
+  compliance_topics = ["customers/data_request", "customers/redact", "shop/redact"]
+  uri = "/webhooks/compliance"
+
+[pos]
+embedded = false

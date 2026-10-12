@@ -1,0 +1,232 @@
+// PRD Section 7 — data model. Postgres (Neon in production).
+// Every table except Session carries shopId and every query filters on it.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL") // Neon: pooled connection string
+  directUrl = env("DIRECT_URL") // Neon: direct connection string (migrations)
+}
+
+// Shopify session storage (template). accessToken / refreshToken are stored
+// encrypted by app/lib/encrypted-session-storage.server.ts.
+model Session {
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+
+  @@index([shop])
+}
+
+model Shop {
+  id             String    @id @default(cuid())
+  domain         String    @unique
+  name           String?
+  plan           String    @default("free") // free | starter | growth | scale
+  trialUsed      Boolean   @default(false)
+  active         Boolean   @default(true)
+  sellsToEu      Boolean?
+  guardAlert     Boolean   @default(false) // UC-12: a ready product regressed
+  installedAt    DateTime  @default(now())
+  uninstalledAt  DateTime?
+  planCheckedAt  DateTime?
+
+  settings          Settings?
+  scans             Scan[]
+  snapshots         VariantSnapshot[]
+  issues            Issue[]
+  supplierRequests  SupplierRequest[]
+  jobs              Job[]
+  audit             AuditLog[]
+}
+
+model Settings {
+  shopId            String   @id
+  shop              Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  includeDraft      Boolean  @default(false)
+  nspidNamespace    String   @default("customs")
+  nspidKey          String   @default("manufacturer_product_id")
+  ownBrandVendors   String[] @default([])
+  extraPlaceholders String[] @default([])
+  hsAsError         Boolean  @default(false)
+  weeklyEmail       Boolean  @default(true)
+  mappingRequired   Boolean  @default(false) // E-09: default key exists with a different type
+  euBannerDismissed Boolean  @default(false)
+  updatedAt         DateTime @updatedAt
+}
+
+model Scan {
+  id              String    @id @default(cuid())
+  shopId          String
+  shop            Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  status          String    @default("queued") // queued | running | complete | failed
+  bulkOpId        String?
+  attempts        Int       @default(0)
+  error           String?
+  startedAt       DateTime  @default(now())
+  finishedAt      DateTime?
+  variantsTotal   Int       @default(0)
+  variantsInScope Int       @default(0)
+
+  @@index([shopId, status])
+  @@index([bulkOpId])
+}
+
+model VariantSnapshot {
+  shopId               String
+  shop                 Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  variantId            String
+  productId            String
+  productTitle         String
+  variantTitle         String
+  vendor               String
+  productType          String
+  status               String
+  requiresShipping     Boolean
+  isGiftCard           Boolean
+  sku                  String?
+  barcodes             String[]
+  nspid                String?
+  noStandardIdentifier Boolean   @default(false)
+  hsCode               String?
+  countryOfOrigin      String?
+  imageUrl             String?
+  inventoryItemId      String?
+  collectionIds        String[]  @default([])
+  updatedAt            DateTime
+  scanId               String?
+  inScope              Boolean   @default(true)
+  ready                Boolean   @default(false)
+
+  @@id([shopId, variantId])
+  @@index([shopId, vendor])
+  @@index([shopId, productId])
+  @@index([shopId, sku])
+}
+
+model Issue {
+  id          String    @id @default(cuid())
+  shopId      String
+  shop        Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  variantId   String
+  ruleCode    String
+  severity    String // error | warning | info
+  message     String
+  suggestion  String?
+  status      String    @default("open") // open | resolved
+  firstSeenAt DateTime  @default(now())
+  resolvedAt  DateTime?
+
+  @@unique([shopId, variantId, ruleCode])
+  @@index([shopId, status, severity])
+  @@index([shopId, status, ruleCode])
+}
+
+model SupplierRequest {
+  id            String    @id @default(cuid())
+  shopId        String
+  shop          Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  supplierName  String
+  supplierEmail String?
+  tokenHash     String    @unique // SHA-256 of the 32-byte token; the token itself is never stored
+  expiresAt     DateTime
+  revoked       Boolean   @default(false)
+  createdBy     String
+  createdAt     DateTime  @default(now())
+
+  items       SupplierRequestItem[]
+  submissions SupplierSubmission[]
+
+  @@index([shopId])
+}
+
+model SupplierRequestItem {
+  requestId    String
+  request      SupplierRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  variantId    String
+  needsNspid   Boolean
+  needsBarcode Boolean
+
+  @@id([requestId, variantId])
+}
+
+model SupplierSubmission {
+  id           String          @id @default(cuid())
+  requestId    String
+  request      SupplierRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  variantId    String
+  nspid        String?
+  barcode      String?
+  noBarcode    Boolean         @default(false)
+  submittedAt  DateTime        @default(now())
+  reviewStatus String          @default("pending") // pending | approved | rejected
+  reviewedAt   DateTime?
+
+  @@unique([requestId, variantId])
+  @@index([requestId, reviewStatus])
+}
+
+model Job {
+  id            String    @id @default(cuid())
+  shopId        String
+  shop          Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  type          String // no_barcode_bulk | csv_apply | supplier_apply
+  status        String    @default("queued") // queued | running | complete | failed
+  payload       Json
+  total         Int       @default(0)
+  done          Int       @default(0)
+  failed        Int       @default(0)
+  failures      Json      @default("[]")
+  resultFileUrl String?
+  actor         String
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([shopId, status])
+  @@index([status])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  shopId    String
+  shop      Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  actor     String // user id, supplier:<requestId>, or system
+  action    String
+  variantId String?
+  field     String?
+  oldValue  String?
+  newValue  String?
+  count     Int?
+  at        DateTime @default(now())
+
+  @@index([shopId, at])
+  @@index([shopId, actor, action, at])
+}
+
+model WebhookEvent {
+  webhookId  String   @id
+  shopId     String?
+  shopDomain String
+  topic      String
+  receivedAt DateTime @default(now())
+
+  @@index([receivedAt])
+  @@index([shopDomain])
+}
