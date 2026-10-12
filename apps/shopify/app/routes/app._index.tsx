@@ -10,10 +10,9 @@ import prisma from "../db.server";
 import { adminContext } from "../lib/context.server";
 import { dashboardSummary } from "../lib/evaluate.server";
 import { lastGoodScan, latestScan, queueEuSync, startScan } from "../lib/scan.server";
-import { euFilterOn, euVariantIds } from "../lib/eu-orders.server";
-import { EU_WINDOW_DAYS } from "../lib/constants";
-import { PROVIDERS } from "../lib/providers";
-import { CODES, daysLeft, downloadFile, usePolling } from "../components/ui";
+import { euFilter } from "../lib/eu-shipping.server";
+import { providerNames } from "../lib/providers";
+import { CODES, When, daysLeft, downloadFile, usePolling } from "../components/ui";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { shop } = await adminContext(request);
@@ -22,23 +21,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     lastGoodScan(prisma, shop.id),
     prisma.job.findFirst({ where: { shopId: shop.id, type: "eu_sync", status: { in: ["queued", "running"] } } }),
   ]);
-  const euOn = euFilterOn(shop);
-  const only = euOn ? await euVariantIds(prisma, shop.id) : null;
-  const summary = good ? await dashboardSummary(prisma, shop.id, only) : null;
-  const allCount = good && euOn ? await prisma.variantSnapshot.count({ where: { shopId: shop.id, inScope: true } }) : null;
+  const eu = await euFilter(prisma, shop);
+  const summary = good ? await dashboardSummary(prisma, shop.id, eu.ids) : null;
   return {
     scan: scan && { status: scan.status, startedAt: scan.startedAt.toISOString(), error: scan.error },
     good: good && { finishedAt: good.finishedAt?.toISOString() ?? null, total: good.variantsTotal },
     summary,
-    allCount,
     eu: {
-      on: euOn,
+      on: eu.on,
       wanted: shop.settings.euOnly,
       status: euJob ? "running" : shop.euSyncStatus,
-      orders: shop.euOrderCount,
-      syncedAt: shop.euSyncedAt?.toISOString() ?? null,
+      euCount: eu.euCount,
+      total: eu.total,
+      countries: shop.euCountries.length,
     },
-    provider: PROVIDERS.find((p) => p.id === shop.settings.provider)?.name ?? null,
+    providers: providerNames(shop.settings.provider),
     showEuBanner: shop.sellsToEu === false && !shop.settings.euBannerDismissed,
     guardAlert: shop.guardAlert,
     mappingRequired: shop.settings.mappingRequired,
@@ -138,7 +135,7 @@ function NextSteps({ steps }: { steps: Step[] }) {
 }
 
 export default function Dashboard() {
-  const { scan, good, summary, allCount, eu, provider, showEuBanner, guardAlert, mappingRequired } = useLoaderData<typeof loader>();
+  const { scan, good, summary, eu, providers, showEuBanner, guardAlert, mappingRequired } = useLoaderData<typeof loader>();
   const running = scan?.status === "running" || scan?.status === "queued";
   usePolling(running || eu.status === "running");
   const days = daysLeft();
@@ -221,11 +218,11 @@ export default function Dashboard() {
     },
     {
       done: false,
-      title: "Send the codes to your shipping provider",
-      detail: provider
-        ? `You use ${provider}. See how they pick up the codes, download the customs file, or print codes for an order.`
+      title: "Send the codes to your shipping providers",
+      detail: providers.length
+        ? `You use ${providers.join(", ")}. Open to write the codes where they read them, or get their file.`
         : "Customs gets the codes from whoever files your parcels: your carrier, shipping app or broker. Pick yours to see what they need.",
-      actions: [{ label: provider ? "Open" : "Choose provider", href: "/app/ship", primary: true }],
+      actions: [{ label: providers.length ? "Open" : "Choose providers", href: "/app/ship", primary: true }],
     },
   ];
 
@@ -272,11 +269,11 @@ export default function Dashboard() {
               The codes are your SKU, the manufacturer’s own code, and the barcode. Your carrier sends them with each parcel’s customs data. Nothing is printed on the label.
               If a code is missing or wrong, customs can hold the parcel. PID Ready finds the gaps, helps you fill them, and gets the codes to your shipping provider.
             </s-paragraph>
-            <s-text type="strong">{days === null ? "The rule applies now." : `${days} day${days === 1 ? "" : "s"} left.`}</s-text>
+            <s-text type="strong">{days === null ? "The rule applies now." : `${days} day${days === 1 ? "" : "s"} left. UPS starts checking on 25 Oct and FedEx on 26 Oct.`}</s-text>
           </s-stack>
         </s-section>
 
-        <EuScope eu={eu} allCount={allCount} />
+        <EuScope eu={eu} />
 
         {s.inScope === 0 ? (
           <s-section heading="Nothing to check">
@@ -302,7 +299,7 @@ export default function Dashboard() {
                   An item is one product option, like a size or colour. “Ready” means all 3 codes are there and look right.
                   {s.outOfScope > 0 ? ` ${items(s.outOfScope)} skipped (drafts, gift cards, digital).` : ""}
                 </s-text>
-                <s-text color="subdued">Last checked {good.finishedAt ? new Date(good.finishedAt).toLocaleString() : "—"}</s-text>
+                <s-text color="subdued">Last checked {good.finishedAt ? <When iso={good.finishedAt} /> : "—"}</s-text>
               </s-stack>
             </s-section>
 
@@ -376,8 +373,8 @@ export default function Dashboard() {
   );
 }
 
-/** Which items the numbers cover: only EU-shipped ones (from orders) or the whole catalogue. */
-function EuScope({ eu, allCount }: { eu: { on: boolean; wanted: boolean; status: string | null; orders: number; syncedAt: string | null }; allCount: number | null }) {
+/** Which items the numbers cover: only those your shipping settings can send to the EU, or all. */
+function EuScope({ eu }: { eu: { on: boolean; wanted: boolean; status: string | null; euCount: number | null; total: number; countries: number } }) {
   const toggle = (value: boolean, label: string) => (
     <Form method="post">
       <Hidden intent="eu-only" value={String(value)} />
@@ -387,50 +384,35 @@ function EuScope({ eu, allCount }: { eu: { on: boolean; wanted: boolean; status:
   const refresh = (
     <Form method="post">
       <Hidden intent="eu-refresh" />
-      <s-button type="submit" variant="tertiary">Try again</s-button>
+      <s-button type="submit" variant="tertiary">Check again</s-button>
     </Form>
+  );
+  const row = (text: string, action?: ReactNode) => (
+    <s-stack direction="inline" gap="small" alignItems="center" justifyContent="space-between">
+      <s-text>{text}</s-text>
+      {action}
+    </s-stack>
   );
   let body: ReactNode;
   if (eu.status === "running") {
     body = (
       <s-stack direction="inline" gap="small" alignItems="center">
-        <s-spinner accessibilityLabel="Reading orders" size="base" />
-        <s-text>Finding which products you ship to the EU… Showing all products for now.</s-text>
+        <s-spinner accessibilityLabel="Reading shipping settings" size="base" />
+        <s-text>Reading your shipping settings to see which products can go to the EU…</s-text>
       </s-stack>
     );
-  } else if (eu.on) {
-    body = (
-      <s-stack direction="inline" gap="small" alignItems="center" justifyContent="space-between">
-        <s-text>
-          Showing only products you shipped to EU shoppers in the last {EU_WINDOW_DAYS} days ({fmt(eu.orders)} order{eu.orders === 1 ? "" : "s"}).
-          {allCount !== null ? ` Your store has ${items(allCount)} in total.` : ""}
-        </s-text>
-        {toggle(false, "Show all products")}
-      </s-stack>
-    );
-  } else if (eu.status === "ok" && eu.orders === 0) {
-    body = <s-text>No orders to EU countries in the last {EU_WINDOW_DAYS} days, so we show all products. Fix the ones you plan to sell to the EU.</s-text>;
-  } else if (eu.status === "ok" && !eu.wanted) {
-    body = (
-      <s-stack direction="inline" gap="small" alignItems="center" justifyContent="space-between">
-        <s-text>Showing all products. {fmt(eu.orders)} EU order{eu.orders === 1 ? "" : "s"} in the last {EU_WINDOW_DAYS} days.</s-text>
-        {toggle(true, "Show only products shipped to the EU")}
-      </s-stack>
-    );
+  } else if (eu.status === "ok" && eu.euCount === 0) {
+    body = row("Your shipping settings don’t send to any EU country, so these codes may not matter to you yet. Showing all products.", refresh);
+  } else if (eu.status === "ok" && eu.on) {
+    body = row(`Showing the ${items(eu.euCount ?? 0)} your shipping settings can send to the EU (${eu.countries} EU countries). ${items(eu.total - (eu.euCount ?? 0))} can’t, so they’re hidden.`, toggle(false, "Show all products"));
+  } else if (eu.status === "ok" && !eu.wanted && (eu.euCount ?? 0) < eu.total) {
+    body = row(`Showing all products. ${items(eu.euCount ?? 0)} of ${items(eu.total)} can ship to the EU.`, toggle(true, "Show only EU products"));
+  } else if (eu.status === "ok") {
+    body = <s-text>Every product can ship to the EU ({eu.countries} EU countries in your shipping settings), so all of them need the codes.</s-text>;
   } else if (eu.status === "no_access") {
-    body = (
-      <s-stack direction="inline" gap="small" alignItems="center" justifyContent="space-between">
-        <s-text>Showing all products. To show only what you ship to the EU, PID Ready needs to read orders (country and items only, never names or addresses). Approve it when Shopify asks.</s-text>
-        {refresh}
-      </s-stack>
-    );
+    body = row("Showing all products. To hide products you never ship to the EU, PID Ready needs to read your shipping settings. Approve it when Shopify asks.", refresh);
   } else if (eu.status === "failed") {
-    body = (
-      <s-stack direction="inline" gap="small" alignItems="center" justifyContent="space-between">
-        <s-text>We couldn’t read your EU orders. Showing all products.</s-text>
-        {refresh}
-      </s-stack>
-    );
+    body = row("We couldn’t read your shipping settings. Showing all products.", refresh);
   } else {
     body = <s-text>Showing all products.</s-text>;
   }

@@ -54,11 +54,12 @@ async function fetchNodes(gql: Gql, k: NspidKey, ids: string[]) {
 }
 
 function currentValues(n: VariantNode) {
-  const split = splitBarcodes(barcodeList(n), n.nspid?.value?.trim() || null);
+  const meta = n.nspid?.value?.trim() || null;
+  const split = splitBarcodes(barcodeList(n), meta);
   return {
     sku: n.sku || null,
     barcode: split.standard[0] || null,
-    nspid: n.nspid?.value || null,
+    nspid: split.nsBarcode ?? meta,
     noStandardIdentifier: n.noStd?.value === "true",
     hsCode: n.inventoryItem?.harmonizedSystemCode || null,
     countryOfOrigin: n.inventoryItem?.countryCodeOfOrigin || null,
@@ -71,33 +72,39 @@ const hasBarcodeList = (n: VariantNode) => !!n.barcodes && Array.isArray(n.barco
 /**
  * Build the full barcode list to send (`barcodes` replaces the whole set). Keeps every other
  * entry in place and in order:
- *  - barcode change: replace the entry that counts as the standard barcode, or put the new one first
- *  - manufacturer code change: if the old code is in the list, swap it for the new one
+ *  - barcode change: replace the entry that counts as the standard barcode (typed GTIN), or put it first
+ *  - manufacturer code change (or `ensureNs`): drop old copies, then place it as an NS_PID barcode
+ *    right after the standard barcode(s), so it stays inside the first 5 (Zonos reads 5)
  */
-export function nextBarcodes(n: VariantNode, diff: VariantChange): BarcodeEntry[] | null {
-  const list = barcodeList(n).map((b) => ({ value: b.value, type: b.type ?? null }));
-  const oldNspid = n.nspid?.value?.trim() || null;
-  let changed = false;
+export function nextBarcodes(n: VariantNode, diff: VariantChange, opts: { nsBarcode: boolean; ensureNs?: string | null }): BarcodeEntry[] | null {
+  const before = barcodeList(n).map((b) => ({ value: b.value.trim(), type: b.type ?? null }));
+  let list = before.map((b) => ({ ...b }));
+  const meta = n.nspid?.value?.trim() || null;
+  const split = splitBarcodes(list, meta);
+  const oldNs = split.nsBarcode ?? meta;
   if ("barcode" in diff) {
-    const std = splitBarcodes(list, oldNspid).standard[0];
-    const idx = std ? list.findIndex((b) => b.value.trim() === std) : -1;
+    const std = split.standard[0];
+    const idx = std ? list.findIndex((b) => b.value === std && b.type !== "NS_PID") : -1;
     const nv = diff.barcode ? normalizeBarcode(diff.barcode) : "";
     const entry = { value: nv, type: nv && isValidGtin(nv) ? "GTIN" : null };
     if (nv) {
       if (idx >= 0) list[idx] = entry;
       else list.unshift(entry);
     } else if (idx >= 0) list.splice(idx, 1);
-    changed = true;
   }
-  if ("nspid" in diff && oldNspid) {
-    const idx = list.findIndex((b) => !b.type && b.value.trim() === oldNspid);
-    if (idx >= 0) {
-      if (diff.nspid) list[idx] = { value: diff.nspid, type: null };
-      else list.splice(idx, 1);
-      changed = true;
+  const target = "nspid" in diff ? diff.nspid || null : opts.ensureNs !== undefined ? opts.ensureNs : undefined;
+  if (target !== undefined) {
+    // Remove every NS_PID entry and untyped copies of the old/new code.
+    list = list.filter((b) => b.type !== "NS_PID" && !(!b.type && (b.value === oldNs || b.value === target)));
+    if (target && opts.nsBarcode) {
+      const stdTypes = new Set(["UPC", "EAN", "GTIN", "ISBN"]);
+      let at = 0;
+      while (at < list.length && at < 4 && (stdTypes.has(String(list[at]!.type)) || (!list[at]!.type && /^[\d\s-]+$/.test(list[at]!.value)))) at++;
+      list.splice(at, 0, { value: target, type: "NS_PID" });
     }
   }
-  return changed ? list : null;
+  const same = list.length === before.length && list.every((b, k) => b.value === before[k]!.value && (b.type ?? null) === (before[k]!.type ?? null));
+  return same ? null : list.slice(0, 20);
 }
 
 export async function applyChanges(
@@ -108,6 +115,7 @@ export async function applyChanges(
   opts: { reevaluate?: boolean; audit?: "per-field" | "none" } = {},
 ): Promise<WriteOutcome[]> {
   const k = await nspidKey(db, ctx.shopId);
+  const nsBarcode = (await db.settings.findUnique({ where: { shopId: ctx.shopId }, select: { nspidBarcode: true } }))?.nspidBarcode ?? true;
   const outcomes = new Map<string, WriteOutcome>();
   for (const it of items) outcomes.set(it.variantId, { variantId: it.variantId, status: "unchanged", written: [], errors: {} });
 
@@ -158,7 +166,7 @@ export async function applyChanges(
   const byProduct = new Map<string, Plan[]>();
   const newLists = new Map<string, BarcodeEntry[]>();
   for (const p of plans) {
-    const list2 = hasBarcodeList(p.node) ? nextBarcodes(p.node, p.diff) : null;
+    const list2 = hasBarcodeList(p.node) ? nextBarcodes(p.node, p.diff, { nsBarcode }) : null;
     if (list2) newLists.set(p.node.id, list2);
     if (!("sku" in p.diff) && !("barcode" in p.diff) && !list2) continue;
     const list = byProduct.get(p.node.product.id) ?? [];
@@ -301,17 +309,24 @@ export async function refreshSnapshots(db: PrismaClient, shopId: string, nodes: 
 }
 
 /**
- * Zonos and Passport read the manufacturer code from the variant's barcode list, not from a
- * metafield. Append the stored code (metafield) as an extra untyped barcode, keeping every
- * existing barcode first and in order. Shopify's API has no NS-PID barcode type, so the entry
- * has no type. Variants already carrying it, or with 20 barcodes, are skipped.
+ * Publish stored manufacturer codes where providers read them:
+ *  - Shopify's NS_PID barcode (Zonos, Passport, Global-e read it). Older untyped copies are retyped.
+ *  - FlavorCloud metafields, when FlavorCloud is one of the merchant's providers.
+ * Existing barcodes keep their order; the code goes right after the standard barcode.
  */
-export async function addNspidToBarcodes(db: PrismaClient, gql: Gql, ctx: WriteCtx, variantIds: string[]): Promise<WriteOutcome[]> {
+export async function publishCodes(
+  db: PrismaClient,
+  gql: Gql,
+  ctx: WriteCtx,
+  variantIds: string[],
+  opts: { flavorcloud?: boolean } = {},
+): Promise<WriteOutcome[]> {
   const k = await nspidKey(db, ctx.shopId);
   const live = await fetchNodes(gql, k, variantIds);
   const outcomes = new Map<string, WriteOutcome>();
   for (const id of variantIds) outcomes.set(id, { variantId: id, status: "unchanged", written: [], errors: {} });
   const byProduct = new Map<string, { id: string; barcodes: BarcodeEntry[]; value: string }[]>();
+  const mirrors: { ownerId: string; namespace: string; key: string; type: string; value: string }[] = [];
   for (const id of variantIds) {
     const n = live.get(id);
     const o = outcomes.get(id)!;
@@ -320,23 +335,27 @@ export async function addNspidToBarcodes(db: PrismaClient, gql: Gql, ctx: WriteC
       o.errors.general = "This variant no longer exists in Shopify.";
       continue;
     }
-    const value = n.nspid?.value?.trim();
-    if (!value) continue;
-    if (!hasBarcodeList(n)) {
-      o.status = "error";
-      o.errors.general = "This store's Shopify version can't hold more than one barcode yet.";
-      continue;
+    const cur = currentValues(n);
+    const value = cur.nspid;
+    if (value && hasBarcodeList(n)) {
+      const list = nextBarcodes(n, {}, { nsBarcode: true, ensureNs: value });
+      if (list) {
+        const arr = byProduct.get(n.product.id) ?? [];
+        arr.push({ id, barcodes: list, value });
+        byProduct.set(n.product.id, arr);
+      }
     }
-    const list = barcodeList(n).map((b) => ({ value: b.value, type: b.type ?? null }));
-    if (list.some((b) => b.value.trim() === value)) continue;
-    if (list.length >= 20) {
-      o.status = "error";
-      o.errors.general = "This variant already has 20 barcodes, Shopify's maximum.";
-      continue;
+    if (opts.flavorcloud) {
+      const gtin = cur.barcode && isValidGtin(normalizeBarcode(cur.barcode)) ? normalizeBarcode(cur.barcode) : null;
+      const fc = (key: string, v: string) => mirrors.push({ ownerId: id, namespace: "flavorcloud", key, type: "single_line_text_field", value: v });
+      if (value) fc("ns_manufacturer_pid", value.slice(0, 70));
+      if (gtin) {
+        fc("std_manufacturer_pid", gtin);
+        fc("std_manufacturer_pid_type", gtin.length === 13 ? "EAN13" : gtin.length === 8 ? "EAN8" : gtin.length === 12 ? "UPC" : "GTIN");
+      } else if (cur.noStandardIdentifier) {
+        fc("std_manufacturer_pid_type", "NONE");
+      }
     }
-    const arr = byProduct.get(n.product.id) ?? [];
-    arr.push({ id, barcodes: [...list, { value, type: null }], value });
-    byProduct.set(n.product.id, arr);
   }
   const audits: any[] = [];
   for (const [productId, list] of byProduct) {
@@ -357,7 +376,7 @@ export async function addNspidToBarcodes(db: PrismaClient, gql: Gql, ctx: WriteC
         } else {
           o.status = "saved";
           o.written.push("nspid");
-          audits.push({ shopId: ctx.shopId, actor: ctx.actor, action: "nspid_to_barcodes", variantId: v.id, field: "barcodes", newValue: v.value });
+          audits.push({ shopId: ctx.shopId, actor: ctx.actor, action: "nspid_barcode", variantId: v.id, field: "barcodes", newValue: v.value });
         }
       });
     } catch (e: any) {
@@ -366,6 +385,21 @@ export async function addNspidToBarcodes(db: PrismaClient, gql: Gql, ctx: WriteC
         o.status = "error";
         o.errors.general = String(e?.message ?? e);
       }
+    }
+  }
+  for (const c of chunk(mirrors, 25)) {
+    try {
+      const res = await gql<any>(METAFIELDS_SET, { metafields: c });
+      const errs = res?.metafieldsSet?.userErrors ?? [];
+      for (const m of c) {
+        const o = outcomes.get(m.ownerId)!;
+        if (errs.length) {
+          o.status = "error";
+          o.errors.general = errs[0].message;
+        } else if (o.status === "unchanged") o.status = "saved";
+      }
+    } catch (e: any) {
+      for (const m of c) outcomes.get(m.ownerId)!.errors.general = String(e?.message ?? e);
     }
   }
   if (audits.length) await db.auditLog.createMany({ data: audits });

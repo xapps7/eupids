@@ -9,7 +9,7 @@ import { adminContext, syncPlan } from "../lib/context.server";
 import { applyChanges, type WriteOutcome } from "../lib/writes.server";
 import { checkFixGate, upgradeResponse } from "../lib/gate.server";
 import { fieldErrors, normalizeChange, type VariantChange } from "../lib/validate";
-import { RULE_LABEL, SEVERITY_TONE, toast } from "../components/ui";
+import { RULE_LABEL, SEVERITY_TONE, toast, When } from "../components/ui";
 import { Checkbox, Mono, TextField } from "../components/wc";
 import { UpgradePrompt, type Upgrade } from "../components/UpgradePrompt";
 
@@ -241,7 +241,7 @@ export default function VariantPanel() {
             <s-divider />
             <s-stack gap="small-200">
               <s-text color="subdued">Vendor: {snap.vendor || "—"}</s-text>
-              <s-text color="subdued">Last changed in Shopify: {new Date(snap.updatedAt).toLocaleString()}</s-text>
+              <s-text color="subdued">Last changed in Shopify: <When iso={snap.updatedAt} /></s-text>
             </s-stack>
           </s-section>
         </s-grid></s-query-container>

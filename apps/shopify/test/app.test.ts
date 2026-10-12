@@ -7,10 +7,10 @@ import { FakeShopify, seedDemo } from "../app/lib/fake-shopify.server";
 import { onInstalled } from "../app/lib/install.server";
 import { onBulkFinish, startScan } from "../app/lib/scan.server";
 import { dashboardSummary, reevaluateShop } from "../app/lib/evaluate.server";
-import { addNspidToBarcodes, applyChanges } from "../app/lib/writes.server";
-import { syncEuOrders, euVariantIds, redactEuOrders } from "../app/lib/eu-orders.server";
+import { publishCodes, applyChanges } from "../app/lib/writes.server";
+import { syncEuShipping, euVariantIds, euFilter } from "../app/lib/eu-shipping.server";
 import { ingest } from "../app/lib/scan.server";
-import { orderSheet } from "../app/lib/ship.server";
+import { productSheet } from "../app/lib/ship.server";
 import { enqueue, runJob, claimJobs, requeueStale } from "../app/lib/jobs.server";
 import { exportIssuesCsv, previewImport, itemsFromPreview, failuresCsv, readinessReportCsv, customsFileCsv } from "../app/lib/csv.server";
 import * as supplier from "../app/lib/supplier.server";
@@ -26,7 +26,7 @@ const DOMAIN = "indigo-loom.myshopify.com";
 
 async function wipe() {
   await db.$executeRawUnsafe(
-    `TRUNCATE "EuDemand","EuOrder","AuditLog","Job","SupplierSubmission","SupplierRequestItem","SupplierRequest","Issue","VariantSnapshot","Scan","Settings","Shop","WebhookEvent","Session" CASCADE`,
+    `TRUNCATE "EuProfileVariant","AuditLog","Job","SupplierSubmission","SupplierRequestItem","SupplierRequest","Issue","VariantSnapshot","Scan","Settings","Shop","WebhookEvent","Session" CASCADE`,
   );
 }
 
@@ -179,8 +179,10 @@ test("AT-08: CSV round-trip — 300 changed rows, 20 invalid", async () => {
   assert.equal(done.failed, 0);
   const fcsv = parseCsv(failuresCsv(preview, done.failures as any));
   assert.equal(fcsv.length - 1, 20);
-  // Only changed fields were written: SKU untouched.
-  assert.equal(f.countOps("UpdateVariants"), 0);
+  // Only changed fields were written: SKU untouched; the manufacturer code also became an NS_PID barcode.
+  const vs = [...f.variants.values()];
+  assert.ok(vs.every((v, i) => v.sku === `S-${i}`));
+  assert.equal(vs.filter((v) => v.barcodeType === "NS_PID" && v.barcode?.startsWith("MFR-")).length, 280);
 });
 
 test("UC-06 A1: unknown variant ids are listed and skipped", async () => {
@@ -414,68 +416,62 @@ test("NFR: THROTTLED responses are retried with backoff", async () => {
 
 const EAN = "8901234567890"; // valid EAN-13
 
-test("EU: only B2C, non-cancelled, non-test orders to EU countries count; summary narrows to them", async () => {
+test("EU: shipping profiles decide which items can reach the EU; summary narrows to them", async () => {
   const a = f.add({ productId: "gid://shopify/Product/1", sku: "A-1", barcode: EAN });
   const b = f.add({ productId: "gid://shopify/Product/2", sku: "B-1" });
   const c = f.add({ productId: "gid://shopify/Product/3", sku: "C-1" });
-  const recent = new Date(Date.now() - 5 * 86_400_000).toISOString();
-  const old = new Date(Date.now() - 90 * 86_400_000).toISOString();
-  f.orders.push(
-    { id: "gid://shopify/Order/1", name: "#1001", createdAt: recent, country: "DE", lines: [{ variantId: a.id, quantity: 2 }] },
-    { id: "gid://shopify/Order/2", name: "#1002", createdAt: recent, country: "FR", lines: [{ variantId: a.id, quantity: 1 }] },
-    { id: "gid://shopify/Order/3", name: "#1003", createdAt: recent, country: "US", lines: [{ variantId: b.id, quantity: 1 }] },
-    { id: "gid://shopify/Order/4", name: "#1004", createdAt: recent, country: "NL", cancelled: true, lines: [{ variantId: b.id, quantity: 1 }] },
-    { id: "gid://shopify/Order/5", name: "#1005", createdAt: recent, country: "IT", b2b: true, lines: [{ variantId: b.id, quantity: 1 }] },
-    { id: "gid://shopify/Order/6", name: "#1006", createdAt: recent, country: "ES", test: true, lines: [{ variantId: b.id, quantity: 1 }] },
-    { id: "gid://shopify/Order/7", name: "#1007", createdAt: old, country: "DE", lines: [{ variantId: c.id, quantity: 1 }] },
-    { id: "gid://shopify/Order/8", name: "#1008", createdAt: recent, country: "GB", lines: [{ variantId: c.id, quantity: 1 }] },
-  );
+  f.profiles.push({ id: "gid://shopify/DeliveryProfile/2", name: "India only", default: false, countries: ["IN"], variantIds: [b.id] });
+  f.profiles.push({ id: "gid://shopify/DeliveryProfile/3", name: "Worldwide", default: false, countries: [], restOfWorld: true, variantIds: [c.id] });
   const shop = await install();
-  const r = await syncEuOrders(db, f.gql, shop.id);
+  const r = await syncEuShipping(db, f.gql, shop.id);
   assert.ok(r.ok);
-  assert.equal(r.euOrders, 2);
-  const d = await db.euDemand.findMany({ where: { shopId: shop.id } });
-  assert.equal(d.length, 1);
-  assert.equal(d[0]!.variantId, a.id);
-  assert.equal(d[0]!.units, 3);
-  assert.equal(d[0]!.orders, 2);
-  const only = await euVariantIds(db, shop.id);
-  const s = await dashboardSummary(db, shop.id, only);
-  assert.equal(s.inScope, 1);
-  const all = await dashboardSummary(db, shop.id);
-  assert.equal(all.inScope, 3);
-  // Print sheet uses current codes; customers/redact drops the order from the print list.
-  const sheet = await orderSheet(db, shop.id, "gid://shopify/Order/1");
-  assert.equal(sheet!.rows[0]!.sku, "A-1");
-  assert.equal(sheet!.rows[0]!.barcode, EAN);
-  await redactEuOrders(db, DOMAIN, [1]);
-  assert.equal(await orderSheet(db, shop.id, "gid://shopify/Order/1"), null);
-  // Stored order data carries no customer details.
-  const stored = JSON.stringify(await db.euOrder.findMany({ where: { shopId: shop.id } }));
-  assert.ok(!/email|address|phone|firstName|lastName/i.test(stored));
+  assert.ok(r.countries.includes("DE") && r.countries.includes("PL")); // rest of world covers every EU country
+  const ids = await euVariantIds(db, shop.id);
+  assert.deepEqual([...ids!].sort(), [a.id, c.id].sort());
+  const row = await db.shop.findUniqueOrThrow({ where: { id: shop.id }, include: { settings: true } });
+  const filter = await euFilter(db, row);
+  assert.equal(filter.on, true);
+  assert.equal((await dashboardSummary(db, shop.id, filter.ids)).inScope, 2);
+  assert.equal((await dashboardSummary(db, shop.id)).inScope, 3);
+  const sheet = await productSheet(db, shop.id, filter.ids);
+  assert.deepEqual(sheet.map((x) => x.sku).sort(), ["A-1", "C-1"]);
+  assert.equal(sheet.find((x) => x.sku === "A-1")!.fedex, ""); // no manufacturer code yet → no FedEx text
 });
 
-test("EU: no order access → status no_access, nothing else breaks", async () => {
+test("EU: default profile without EU countries and no custom profiles → nothing ships to the EU", async () => {
+  f.profiles[0]!.countries = ["US", "CA"];
   f.add({ productId: "gid://shopify/Product/1", sku: "A-1" });
-  f.denyOrders = true;
   const shop = await install();
-  const r = await syncEuOrders(db, f.gql, shop.id);
+  await syncEuShipping(db, f.gql, shop.id);
+  const row = await db.shop.findUniqueOrThrow({ where: { id: shop.id }, include: { settings: true } });
+  assert.equal(row.sellsToEu, false);
+  const filter = await euFilter(db, row);
+  assert.equal(filter.euCount, 0);
+  assert.equal(filter.on, false); // nothing to narrow to: show everything
+});
+
+test("EU: no shipping access → status no_access, nothing else breaks", async () => {
+  f.add({ productId: "gid://shopify/Product/1", sku: "A-1" });
+  f.denyShipping = true;
+  const shop = await install();
+  const r = await syncEuShipping(db, f.gql, shop.id);
   assert.equal(r.ok, false);
   const row = await db.shop.findUniqueOrThrow({ where: { id: shop.id } });
   assert.equal(row.euSyncStatus, "no_access");
+  assert.equal(await euVariantIds(db, shop.id), null);
 });
 
-test("Scan finish queues one EU sync job", async () => {
+test("Scan finish queues one EU shipping check; the job completes", async () => {
   f.add({ productId: "gid://shopify/Product/1", sku: "A-1" });
   const shop = await install();
   const jobs = await db.job.findMany({ where: { shopId: shop.id, type: "eu_sync" } });
   assert.equal(jobs.length, 1);
   await runJob(db, f.gql, jobs[0]!.id);
-  const after = await db.job.findUniqueOrThrow({ where: { id: jobs[0]!.id } });
-  assert.equal(after.status, "complete");
+  assert.equal((await db.job.findUniqueOrThrow({ where: { id: jobs[0]!.id } })).status, "complete");
+  assert.equal((await db.shop.findUniqueOrThrow({ where: { id: shop.id } })).euSyncStatus, "ok");
 });
 
-test("Barcodes: bulk child lines are read; an extra untyped code counts as the manufacturer code; ASIN ignored", async () => {
+test("Barcodes: bulk child lines are read; NS_PID barcode is the manufacturer code; ASIN ignored", async () => {
   const shop = await install(); // empty catalogue; creates shop + scan
   const scan = await db.scan.create({ data: { shopId: shop.id, status: "running", startedAt: new Date() } });
   const v = (id: number, extra: object = {}) => ({
@@ -487,7 +483,7 @@ test("Barcodes: bulk child lines are read; an extra untyped code counts as the m
   const lines = [
     v(1, { barcode: EAN }),
     { value: EAN, type: "EAN", __parentId: "gid://shopify/ProductVariant/1" },
-    { value: "TX-88213", type: null, __parentId: "gid://shopify/ProductVariant/1" },
+    { value: "TX-88213", type: "NS_PID", __parentId: "gid://shopify/ProductVariant/1" },
     v(2, { barcode: "B08N5WRWNW" }),
     { value: "B08N5WRWNW", type: "ASIN", __parentId: "gid://shopify/ProductVariant/2" },
     { value: EAN.slice(0, 12) + "3", type: null, __parentId: "gid://shopify/ProductVariant/2" },
@@ -503,35 +499,67 @@ test("Barcodes: bulk child lines are read; an extra untyped code counts as the m
   assert.ok(issues.some((i) => i.ruleCode === "R-SPID-03")); // wrong check digit still reported
 });
 
-test("Barcodes: editing the barcode keeps the other barcodes; copy-to-barcodes appends the manufacturer code", async () => {
-  const v = f.add({
-    productId: "gid://shopify/Product/1", sku: "A-1", barcode: "1234",
-    extraBarcodes: [{ value: "INTERNAL-7", type: null }],
-    metafields: { "customs.manufacturer_product_id": { type: "single_line_text_field", value: "MFR-1" } },
-  });
+test("Barcodes: saving writes the manufacturer code as an NS_PID barcode after the standard one; other barcodes kept", async () => {
+  const v = f.add({ productId: "gid://shopify/Product/1", sku: "A-1", barcode: "1234", extraBarcodes: [{ value: "INTERNAL-7", type: null }] });
   const shop = await install();
-  const [o] = await applyChanges(db, f.gql, { shopId: shop.id, actor: "t" }, [{ variantId: v.id, changes: { barcode: EAN } }]);
+  const [o] = await applyChanges(db, f.gql, { shopId: shop.id, actor: "t" }, [{ variantId: v.id, changes: { barcode: EAN, nspid: "MFR-1" } }]);
   assert.equal(o!.status, "saved");
-  assert.equal(f.variants.get(v.id)!.barcode, EAN);
-  assert.deepEqual(f.variants.get(v.id)!.extraBarcodes, [{ value: "INTERNAL-7", type: null }]);
-
-  const out = await addNspidToBarcodes(db, f.gql, { shopId: shop.id, actor: "t" }, [v.id]);
-  assert.equal(out[0]!.status, "saved");
-  assert.deepEqual(f.variants.get(v.id)!.extraBarcodes!.map((b) => b.value), ["INTERNAL-7", "MFR-1"]);
-  const snap = await db.variantSnapshot.findUniqueOrThrow({ where: { shopId_variantId: { shopId: shop.id, variantId: v.id } } });
+  const fv = f.variants.get(v.id)!;
+  assert.equal(fv.barcode, EAN);
+  assert.equal(fv.barcodeType, "GTIN");
+  assert.deepEqual(fv.extraBarcodes, [{ value: "MFR-1", type: "NS_PID" }, { value: "INTERNAL-7", type: null }]);
+  assert.equal(fv.metafields["customs.manufacturer_product_id"]!.value, "MFR-1");
+  let snap = await db.variantSnapshot.findUniqueOrThrow({ where: { shopId_variantId: { shopId: shop.id, variantId: v.id } } });
+  assert.equal(snap.nspid, "MFR-1");
   assert.equal(snap.nspidInBarcodes, true);
-  // Running it again changes nothing.
-  const again = await addNspidToBarcodes(db, f.gql, { shopId: shop.id, actor: "t" }, [v.id]);
-  assert.equal(again[0]!.status, "unchanged");
-  // Changing the manufacturer code swaps the copy in the barcode list too.
+  assert.deepEqual(snap.barcodes, [EAN]); // NS_PID and the internal code are not barcodes for customs
+  // Changing the code replaces the NS_PID barcode; no duplicates.
   await applyChanges(db, f.gql, { shopId: shop.id, actor: "t" }, [{ variantId: v.id, changes: { nspid: "MFR-2" } }]);
-  assert.deepEqual(f.variants.get(v.id)!.extraBarcodes!.map((b) => b.value), ["INTERNAL-7", "MFR-2"]);
+  assert.deepEqual(f.variants.get(v.id)!.extraBarcodes, [{ value: "MFR-2", type: "NS_PID" }, { value: "INTERNAL-7", type: null }]);
+  snap = await db.variantSnapshot.findUniqueOrThrow({ where: { shopId_variantId: { shopId: shop.id, variantId: v.id } } });
+  assert.equal(snap.nspid, "MFR-2");
+});
+
+test("Publish: codes stored only in the metafield get an NS_PID barcode; untyped copies are retyped; FlavorCloud fields", async () => {
+  const meta = (v: string) => ({ "customs.manufacturer_product_id": { type: "single_line_text_field", value: v } });
+  const a = f.add({ productId: "gid://shopify/Product/1", sku: "A-1", barcode: EAN, metafields: meta("M-A") });
+  const b = f.add({ productId: "gid://shopify/Product/2", sku: "B-1", barcode: EAN.slice(0, 12) + "3", extraBarcodes: [{ value: "M-B", type: null }], metafields: meta("M-B") });
+  const c = f.add({ productId: "gid://shopify/Product/3", sku: "C-1", metafields: { ...meta("M-C"), "customs.no_standard_identifier": { type: "boolean", value: "true" } } });
+  const shop = await install();
+  const out = await publishCodes(db, f.gql, { shopId: shop.id, actor: "t" }, [a.id, b.id, c.id], { flavorcloud: true });
+  assert.deepEqual(out.map((o) => o.status), ["saved", "saved", "saved"]);
+  assert.deepEqual(f.variants.get(a.id)!.extraBarcodes, [{ value: "M-A", type: "NS_PID" }]);
+  assert.deepEqual(f.variants.get(b.id)!.extraBarcodes, [{ value: "M-B", type: "NS_PID" }]);
+  assert.equal(f.variants.get(c.id)!.barcode, "M-C"); // no standard barcode: NS_PID becomes the only one
+  assert.equal(f.variants.get(c.id)!.barcodeType, "NS_PID");
+  assert.equal(f.variants.get(a.id)!.metafields["flavorcloud.ns_manufacturer_pid"]!.value, "M-A");
+  assert.equal(f.variants.get(a.id)!.metafields["flavorcloud.std_manufacturer_pid_type"]!.value, "EAN13");
+  assert.equal(f.variants.get(c.id)!.metafields["flavorcloud.std_manufacturer_pid_type"]!.value, "NONE");
+  const snapC = await db.variantSnapshot.findUniqueOrThrow({ where: { shopId_variantId: { shopId: shop.id, variantId: c.id } } });
+  assert.deepEqual(snapC.barcodes, []);
+  const issues = await db.issue.findMany({ where: { shopId: shop.id, variantId: c.id, status: "open" } });
+  assert.ok(!issues.some((i) => i.ruleCode.startsWith("R-SPID"))); // still "no barcode", not a bad barcode
+  const again = await publishCodes(db, f.gql, { shopId: shop.id, actor: "t" }, [a.id, b.id, c.id]);
+  assert.deepEqual(again.map((o) => o.status), ["unchanged", "unchanged", "unchanged"]);
 });
 
 test("Customs file: one row per in-scope item with the three codes and Y081", async () => {
   f.add({ productId: "gid://shopify/Product/1", sku: "A-1", barcode: EAN, metafields: { "customs.manufacturer_product_id": { type: "single_line_text_field", value: "M-1" } } });
   f.add({ productId: "gid://shopify/Product/2", sku: "B-1", metafields: { "customs.no_standard_identifier": { type: "boolean", value: "true" } } });
   const shop = await install();
+  const zon = parseCsv(await customsFileCsv(db, shop.id, { format: "zonos" }));
+  assert.equal(zon[0]!.length, 25);
+  assert.equal(zon[0]![23], "GTIN");
+  assert.equal(zon[0]![24], "Manufacturer product ID");
+  const za = zon.find((r) => r[0] === "A-1")!;
+  assert.equal(za[23], EAN);
+  assert.equal(za[24], "M-1");
+  assert.deepEqual(parseCsv(await customsFileCsv(db, shop.id, { format: "veeqo" }))[0], ["sku_code", "upc_code", "upc_code_type", "model_number"]);
+  const ups = parseCsv(await customsFileCsv(db, shop.id, { format: "ups" }));
+  assert.equal(ups.find((r) => r[0] === "B-1")![4], "No");
+  const std = parseCsv(await customsFileCsv(db, shop.id, { format: "standard" }));
+  assert.equal(std.find((r) => r[2] === "A-1")![8], `M-PIDA-1 NS-PIDM-1 S-PID${EAN}`);
+  assert.equal(std.find((r) => r[2] === "B-1")![8], ""); // no manufacturer code
   const rows = parseCsv(await customsFileCsv(db, shop.id, { format: "shipping_app" }));
   assert.deepEqual(rows[0]!.slice(3, 7), ["m_pid", "ns_pid", "s_pid", "s_pid_exception"]);
   const a = rows.find((r) => r[0] === "A-1")!;

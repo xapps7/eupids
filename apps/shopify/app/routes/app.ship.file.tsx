@@ -3,7 +3,7 @@ import type { LoaderFunctionArgs } from "react-router";
 import prisma from "../db.server";
 import { adminContext } from "../lib/context.server";
 import { customsFileCsv, type CustomsFormat } from "../lib/csv.server";
-import { euVariantIds } from "../lib/eu-orders.server";
+import { euVariantIds } from "../lib/eu-shipping.server";
 import { csvResponse } from "../components/ui";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {

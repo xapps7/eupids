@@ -108,27 +108,26 @@ query SampleMetafields {
   }
 }`;
 
-/**
- * EU focus: recent orders with country and line items. No names, emails, phones or street
- * addresses are requested (protected customer data level 1 only). Page size keeps the
- * query cost under the 1,000-point limit.
- */
-export const EU_ORDERS = `#graphql
-query EuOrders($q: String!, $after: String) {
-  orders(first: 25, after: $after, query: $q, sortKey: CREATED_AT, reverse: true) {
+/** EU focus: shipping profiles and the countries their zones reach (read_shipping). */
+export const DELIVERY_PROFILES = `#graphql
+query DeliveryProfiles($after: String) {
+  deliveryProfiles(first: 10, after: $after) {
     nodes {
-      id name createdAt cancelledAt test
-      shippingAddress { countryCodeV2 }
-      purchasingEntity { __typename }
-      lineItems(first: 30) {
-        nodes {
-          title variantTitle sku quantity
-          variant { id }
-          originalUnitPriceSet { shopMoney { amount currencyCode } }
-        }
-      }
+      id name default
+      profileLocationGroups { countriesInAnyZone { country { code { countryCode restOfWorld } } } }
     }
     pageInfo { hasNextPage endCursor }
+  }
+}`;
+
+/** Products and variants assigned to one (custom) shipping profile. */
+export const PROFILE_ITEMS = `#graphql
+query ProfileItems($id: ID!, $after: String) {
+  deliveryProfile(id: $id) {
+    profileItems(first: 25, after: $after) {
+      nodes { product { id } variants(first: 100) { nodes { id } } }
+      pageInfo { hasNextPage endCursor }
+    }
   }
 }`;
 

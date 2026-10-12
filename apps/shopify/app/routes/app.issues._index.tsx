@@ -6,7 +6,7 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import prisma from "../db.server";
 import { adminContext, syncPlan } from "../lib/context.server";
 import { filterOptions, listIssues, parseFilters } from "../lib/issues.server";
-import { euFilterOn } from "../lib/eu-orders.server";
+import { euFilter } from "../lib/eu-shipping.server";
 import { enqueue } from "../lib/jobs.server";
 import { checkFixGate, upgradeResponse } from "../lib/gate.server";
 import { JobProgress, RULE_LABEL, SEVERITY_TONE, downloadFile } from "../components/ui";
@@ -17,10 +17,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { shop } = await adminContext(request);
   const url = new URL(request.url);
   const f = parseFilters(url);
-  const euAvailable = euFilterOn(shop);
-  f.eu = euAvailable && url.searchParams.get("scope") !== "all";
+  const eu = await euFilter(prisma, { ...shop, settings: { euOnly: true } });
+  const euAvailable = eu.on;
+  const euShown = euAvailable && url.searchParams.get("scope") !== "all";
+  if (euShown) f.euDefault = shop.euDefaultShips;
   const [list, opts] = await Promise.all([listIssues(prisma, shop.id, f), filterOptions(prisma, shop.id)]);
-  return { ...list, opts, filters: f, euAvailable, euOrders: shop.euOrderCount, hasEuData: shop.euSyncStatus === "ok" && shop.euOrderCount > 0 };
+  return { ...list, opts, filters: f, euAvailable, euShown };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -93,10 +95,10 @@ export default function Issues() {
         {data.euAvailable && (
           <s-stack direction="inline" gap="small" alignItems="center">
             <s-text color="subdued">
-              {data.filters.eu ? "Showing only items you shipped to the EU in the last 60 days." : "Showing all items."}
+              {data.euShown ? "Showing only items your shipping settings let you send to the EU." : "Showing all items."}
             </s-text>
-            <s-button variant="tertiary" onClick={() => set("scope", data.filters.eu ? "all" : "")}>
-              {data.filters.eu ? "Show all items" : "Show only EU items"}
+            <s-button variant="tertiary" onClick={() => set("scope", data.euShown ? "all" : "")}>
+              {data.euShown ? "Show all items" : "Show only EU items"}
             </s-button>
           </s-stack>
         )}
@@ -182,7 +184,6 @@ export default function Issues() {
                 <s-table-header>SKU</s-table-header>
                 <s-table-header>Barcode</s-table-header>
                 <s-table-header>Manufacturer code</s-table-header>
-                {data.hasEuData && <s-table-header format="numeric">Sold to EU (60 days)</s-table-header>}
                 <s-table-header>Problems</s-table-header>
               </s-table-header-row>
               <s-table-body>
@@ -206,7 +207,6 @@ export default function Issues() {
                       {r.barcodes[0] ? <Mono>{r.barcodes[0]}</Mono> : r.noStandardIdentifier ? <s-badge>None (Y081)</s-badge> : <s-text color="subdued">empty</s-text>}
                     </s-table-cell>
                     <s-table-cell>{r.nspid ? <Mono>{r.nspid}</Mono> : <s-text color="subdued">empty</s-text>}</s-table-cell>
-                    {data.hasEuData && <s-table-cell>{r.euUnits ?? 0}</s-table-cell>}
                     <s-table-cell>
                       <s-stack direction="inline" gap="small-300">
                         {r.issues.map((i) => (

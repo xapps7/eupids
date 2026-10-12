@@ -33,11 +33,11 @@ export type BarcodeEntry = { value: string; type?: string | null };
 const STANDARD_TYPES = new Set(["UPC", "EAN", "GTIN", "ISBN"]);
 
 /**
- * Split a variant's barcodes into standard barcodes (S-PID candidates) and other codes.
+ * Split a variant's barcodes into standard barcodes (S-PID candidates) and manufacturer codes.
  * Rules, in order:
+ *  - typed NS_PID → the manufacturer code (Shopify's own type for it; Zonos, Passport and Global-e read it)
  *  - typed UPC/EAN/GTIN/ISBN → standard; typed ASIN → ignored (an Amazon id, not for customs)
- *  - an untyped entry equal to the stored manufacturer code → the manufacturer code (Zonos/Passport
- *    ask merchants to keep it as a barcode)
+ *  - an untyped entry equal to the stored manufacturer code → manufacturer code (an older untyped copy)
  *  - the first remaining entry → standard (that is what Shopify's single `barcode` field shows,
  *    so a wrong value there is still reported as a barcode problem)
  *  - later untyped entries: all digits → standard; otherwise → other (a manufacturer-code candidate)
@@ -45,12 +45,16 @@ const STANDARD_TYPES = new Set(["UPC", "EAN", "GTIN", "ISBN"]);
 export function splitBarcodes(list: BarcodeEntry[], metafieldNspid: string | null) {
   const standard: string[] = [];
   const other: string[] = [];
-  let nspidInBarcodes = false;
+  let nsBarcode: string | null = null;
   let first = true;
   for (const b of list) {
     const v = (b.value ?? "").trim();
     if (!v) continue;
     const t = b.type ? String(b.type).toUpperCase() : null;
+    if (t === "NS_PID") {
+      nsBarcode ??= v;
+      continue;
+    }
     if (t === "ASIN") continue;
     if (t && STANDARD_TYPES.has(t)) {
       standard.push(v);
@@ -58,7 +62,7 @@ export function splitBarcodes(list: BarcodeEntry[], metafieldNspid: string | nul
       continue;
     }
     if (metafieldNspid && v === metafieldNspid) {
-      nspidInBarcodes = true;
+      other.unshift(v);
       continue;
     }
     if (first) {
@@ -69,7 +73,7 @@ export function splitBarcodes(list: BarcodeEntry[], metafieldNspid: string | nul
     if (/^[\d\s-]+$/.test(v)) standard.push(v);
     else other.push(v);
   }
-  return { standard, other, nspidInBarcodes };
+  return { standard, other, nsBarcode };
 }
 
 export function barcodeList(n: Pick<VariantNode, "barcode" | "barcodes">): BarcodeEntry[] {
@@ -107,8 +111,9 @@ export type SnapshotRow = {
 export function nodeToSnapshot(shopId: string, n: VariantNode, scanId: string | null): SnapshotRow {
   const metaNspid = n.nspid?.value?.trim() || null;
   const split = splitBarcodes(barcodeList(n), metaNspid);
-  // No metafield, but an extra non-barcode code sits in the barcode list: treat it as the manufacturer code.
-  const nspid = metaNspid ?? split.other[0] ?? null;
+  // The NS-PID barcode is what providers read, so it wins. Then our metafield, then an extra
+  // non-barcode code in the list.
+  const nspid = split.nsBarcode ?? metaNspid ?? split.other[0] ?? null;
   return {
     shopId,
     variantId: n.id,
@@ -124,7 +129,7 @@ export function nodeToSnapshot(shopId: string, n: VariantNode, scanId: string | 
     barcodes: split.standard,
     nspid,
     noStandardIdentifier: n.noStd?.value === "true",
-    nspidInBarcodes: split.nspidInBarcodes || (!metaNspid && !!nspid),
+    nspidInBarcodes: !!split.nsBarcode,
     hsCode: n.inventoryItem?.harmonizedSystemCode ?? null,
     countryOfOrigin: n.inventoryItem?.countryCodeOfOrigin ?? null,
     imageUrl: n.product.featuredMedia?.preview?.image?.url ?? null,

@@ -9,8 +9,8 @@ export type IssueFilters = {
   status?: "open" | "resolved";
   q?: string | null;
   cursor?: string | null;
-  /** EU focus: only variants shipped to EU shoppers in the last 60 days. */
-  eu?: boolean;
+  /** EU focus: only variants whose shipping profile reaches the EU. Value = does the default profile? */
+  euDefault?: boolean | null;
 };
 
 export const PAGE_SIZE = 50;
@@ -50,7 +50,8 @@ export async function listIssues(db: PrismaClient, shopId: string, f: IssueFilte
     Prisma.sql`s."shopId" = ${shopId}`,
     Prisma.sql`EXISTS (SELECT 1 FROM "Issue" i WHERE ${Prisma.join(issueConds, " AND ")})`,
   ];
-  if (f.eu) where.push(Prisma.sql`EXISTS (SELECT 1 FROM "EuDemand" d WHERE d."shopId" = s."shopId" AND d."variantId" = s."variantId")`);
+  if (f.euDefault !== undefined && f.euDefault !== null)
+    where.push(Prisma.sql`COALESCE((SELECT p."shipsEu" FROM "EuProfileVariant" p WHERE p."shopId" = s."shopId" AND p."variantId" = s."variantId"), ${f.euDefault})`);
   if (f.vendor) where.push(Prisma.sql`s.vendor = ${f.vendor}`);
   if (f.type) where.push(Prisma.sql`s."productType" = ${f.type}`);
   if (f.q) {
@@ -64,11 +65,9 @@ export async function listIssues(db: PrismaClient, shopId: string, f: IssueFilte
     {
       variantId: string; productId: string; productTitle: string; variantTitle: string; vendor: string;
       sku: string | null; barcodes: string[]; nspid: string | null; imageUrl: string | null; noStandardIdentifier: boolean;
-      euUnits: number | null;
     }[]
   >(Prisma.sql`
-    SELECT s."variantId", s."productId", s."productTitle", s."variantTitle", s.vendor, s.sku, s.barcodes, s.nspid, s."imageUrl", s."noStandardIdentifier",
-      (SELECT d.units FROM "EuDemand" d WHERE d."shopId" = s."shopId" AND d."variantId" = s."variantId") AS "euUnits"
+    SELECT s."variantId", s."productId", s."productTitle", s."variantTitle", s.vendor, s.sku, s.barcodes, s.nspid, s."imageUrl", s."noStandardIdentifier"
     FROM "VariantSnapshot" s
     WHERE ${Prisma.join(where, " AND ")}
     ORDER BY s."productTitle", s."variantId"

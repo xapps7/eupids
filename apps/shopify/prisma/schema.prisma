@@ -47,11 +47,12 @@ model Shop {
   installedAt    DateTime  @default(now())
   uninstalledAt  DateTime?
   planCheckedAt  DateTime?
-  // EU orders focus: which variants were shipped to EU shoppers (last 60 days).
+  // EU focus from shipping settings: which products can be shipped to an EU country.
   euSyncStatus   String?   // null (never) | running | ok | no_access | failed
   euSyncError    String?
   euSyncedAt     DateTime?
-  euOrderCount   Int       @default(0)
+  euDefaultShips Boolean   @default(false) // the general (default) shipping profile reaches the EU
+  euCountries    String[]  @default([])    // EU countries the store ships to
 
   settings          Settings?
   scans             Scan[]
@@ -60,8 +61,7 @@ model Shop {
   supplierRequests  SupplierRequest[]
   jobs              Job[]
   audit             AuditLog[]
-  euDemand          EuDemand[]
-  euOrders          EuOrder[]
+  euProfileItems    EuProfileVariant[]
 }
 
 model Settings {
@@ -76,8 +76,9 @@ model Settings {
   weeklyEmail       Boolean  @default(true)
   mappingRequired   Boolean  @default(false) // E-09: default key exists with a different type
   euBannerDismissed Boolean  @default(false)
-  euOnly            Boolean  @default(true) // dashboard + issues show only items shipped to the EU
-  provider          String   @default("") // who files EU customs: zonos | passport | managed_markets | shipping_app | carrier_portal | broker
+  euOnly            Boolean  @default(true) // dashboard + issues show only items that can ship to the EU
+  provider          String   @default("") // comma-separated provider ids (lib/providers.ts)
+  nspidBarcode      Boolean  @default(true) // also save the manufacturer code as an NS-PID barcode
   updatedAt         DateTime @updatedAt
 }
 
@@ -241,30 +242,14 @@ model WebhookEvent {
   @@index([shopDomain])
 }
 
-// Per-variant EU demand from orders shipped to EU countries in the last 60 days.
-// Rebuilt on every sync. No customer data: only counts.
-model EuDemand {
-  shopId      String
-  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  variantId   String
-  orders      Int
-  units       Int
-  lastOrderAt DateTime
+// Variants in a custom (non-default) shipping profile, and whether that profile reaches an EU
+// country. Variants not listed follow the default profile (Shop.euDefaultShips).
+model EuProfileVariant {
+  shopId    String
+  shop      Shop    @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  variantId String
+  shipsEu   Boolean
+  profile   String
 
   @@id([shopId, variantId])
-}
-
-// Recent EU orders, for the printable customs-codes sheet. Order number, country and
-// line items only: no names, emails, addresses or phone numbers.
-model EuOrder {
-  shopId    String
-  shop      Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
-  orderId   String
-  name      String
-  createdAt DateTime
-  country   String
-  lines     Json // [{ variantId, title, variantTitle, sku, quantity, unitPrice, currency }]
-
-  @@id([shopId, orderId])
-  @@index([shopId, createdAt])
 }

@@ -4,6 +4,7 @@ import { useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import prisma from "../db.server";
 import { adminContext } from "../lib/context.server";
+import { When } from "../components/ui";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { shop } = await adminContext(request);
@@ -63,7 +64,7 @@ export default function Suppliers() {
                   <s-table-cell>
                     <s-badge tone={r.state === "active" ? "success" : "neutral"}>{r.state}</s-badge>
                   </s-table-cell>
-                  <s-table-cell>{new Date(r.createdAt).toLocaleDateString()}</s-table-cell>
+                  <s-table-cell><When iso={r.createdAt} date /></s-table-cell>
                 </s-table-row>
               ))}
             </s-table-body>

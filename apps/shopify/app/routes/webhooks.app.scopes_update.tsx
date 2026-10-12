@@ -9,8 +9,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (session) {
     await db.session.update({ where: { id: session.id }, data: { scope: current.toString() } });
   }
-  // The merchant just approved order access: build the EU view now.
-  if (current.includes("read_orders")) {
+  // The merchant just approved shipping-settings access: build the EU view now.
+  if (current.includes("read_shipping")) {
     const row = await db.shop.findUnique({ where: { domain: shop } });
     if (row?.active) await queueEuSync(db, row.id);
   }

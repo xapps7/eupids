@@ -167,43 +167,84 @@ export async function readinessReportCsv(db: PrismaClient, shopId: string, now =
   return toCsv(rows);
 }
 
-export type CustomsFormat = "standard" | "shipping_app";
+import type { CustomsFormat } from "./constants";
+export type { CustomsFormat };
+export const CUSTOMS_FORMATS: CustomsFormat[] = ["standard", "shipping_app", "zonos", "veeqo", "ups"];
+
+/** Zonos Catalog template header, exactly as in dashboard.zonos.com/assets/zonos-catalog-template.csv. */
+export const ZONOS_HEADER = [
+  "SKU", "Product ID", "Name", "Description", "Customs description", "Weight unit", "Weight", "Dimensional unit", "Length", "Width",
+  "Height", "Product type", "Packing preference", "Restricted countries", "Country of origin", "Universal HS code",
+  "Country-specific HS codes", "Image URL", "Material", "Brand", "Price", "Retail price", "Currency", "GTIN", "Manufacturer product ID",
+];
+
+/** FedEx Ship Manager's single "Product Identifier (PID)" field / invoice text: M-PIDx NS-PIDy S-PIDz (NO when no barcode). */
+export function fedexPidText(sku: string, nspid: string, gtin: string) {
+  return `M-PID${sku} NS-PID${nspid} S-PID${gtin || "NO"}`;
+}
 
 /**
- * The file a carrier, broker or shipping app needs: one row per variant with the three
- * identifiers as they go on the EU customs declaration (document codes C127 / C128 / C129,
- * exception Y081), plus HS code and origin. `only` limits it to EU-shipped variants.
+ * Files for carriers, brokers and shipping apps: one row per item with the three identifiers
+ * as they go on the EU declaration (C127 / C128 / C129, Y081 when there is no barcode).
+ * `only` limits it to items that can ship to the EU.
  */
 export async function customsFileCsv(db: PrismaClient, shopId: string, opts: { format: CustomsFormat; only?: Set<string> | null }, now = new Date()) {
-  const [snaps, settings, demand] = await Promise.all([
+  const [snaps, settings] = await Promise.all([
     db.variantSnapshot.findMany({ where: { shopId }, orderBy: [{ vendor: "asc" }, { productTitle: "asc" }, { variantTitle: "asc" }] }),
     db.settings.findUnique({ where: { shopId } }),
-    db.euDemand.findMany({ where: { shopId }, select: { variantId: true, units: true } }),
   ]);
-  const units = new Map(demand.map((d) => [d.variantId, d.units]));
   const r = evaluate(snaps.map(snapshotToInput), toRuleSettings(settings));
   const byId = new Map(r.results.map((x) => [x.variantId, x]));
-  const rows: (string | number)[][] =
-    opts.format === "shipping_app"
-      ? [["sku", "product_title", "variant_title", "m_pid", "ns_pid", "s_pid", "s_pid_exception", "hs_code", "country_of_origin", "ready"]]
-      : [
-          [DISCLAIMER_LINE(now)],
-          [
-            "Product", "Variant", "SKU (M-PID, code C127)", "Manufacturer code (NS-PID, code C128)", "Barcode (S-PID, code C129)",
-            "No barcode (exception Y081)", "HS code", "Country of origin", "Units shipped to EU (60 days)", "Ready",
-          ],
-        ];
+  const head: Record<CustomsFormat, (string | number)[][]> = {
+    standard: [
+      [DISCLAIMER_LINE(now)],
+      [
+        "Product", "Variant", "SKU (M-PID, code C127)", "Manufacturer code (NS-PID, code C128)", "Barcode (S-PID, code C129)",
+        "No barcode (exception Y081)", "HS code", "Country of origin", "FedEx PID text", "Ready",
+      ],
+    ],
+    shipping_app: [["sku", "product_title", "variant_title", "m_pid", "ns_pid", "s_pid", "s_pid_exception", "hs_code", "country_of_origin", "ready"]],
+    zonos: [ZONOS_HEADER],
+    veeqo: [["sku_code", "upc_code", "upc_code_type", "model_number"]],
+    ups: [["SKU", "Description", "Merchant Product ID", "Manufacturer Product ID", "Standardized Product ID", "HS code", "Country of origin", "Ready"]],
+  };
+  const rows = head[opts.format];
   for (const s of snaps) {
     const res = byId.get(s.variantId);
     if (!res?.inScope) continue;
     if (opts.only && !opts.only.has(s.variantId)) continue;
+    const sku = s.sku ?? "";
+    const ns = s.nspid ?? "";
     const spid = res.spid ?? "";
     const exc = res.spidException ?? "";
     const ready = res.ready ? "yes" : "no";
-    if (opts.format === "shipping_app") {
-      rows.push([s.sku ?? "", s.productTitle, s.variantTitle, s.sku ?? "", s.nspid ?? "", spid, exc, s.hsCode ?? "", s.countryOfOrigin ?? "", ready]);
-    } else {
-      rows.push([s.productTitle, s.variantTitle, s.sku ?? "", s.nspid ?? "", spid, exc, s.hsCode ?? "", s.countryOfOrigin ?? "", units.get(s.variantId) ?? 0, ready]);
+    const name = s.variantTitle ? `${s.productTitle} - ${s.variantTitle}` : s.productTitle;
+    switch (opts.format) {
+      case "shipping_app":
+        rows.push([sku, s.productTitle, s.variantTitle, sku, ns, spid, exc, s.hsCode ?? "", s.countryOfOrigin ?? "", ready]);
+        break;
+      case "zonos": {
+        const row: string[] = ZONOS_HEADER.map(() => "");
+        const set = (col: string, v: string) => (row[ZONOS_HEADER.indexOf(col)] = v);
+        set("SKU", sku);
+        set("Name", name);
+        set("Country of origin", s.countryOfOrigin ?? "");
+        set("Universal HS code", (s.hsCode ?? "").replace(/[\s.]/g, ""));
+        set("Brand", s.vendor);
+        set("GTIN", spid);
+        set("Manufacturer product ID", ns);
+        if (sku) rows.push(row);
+        break;
+      }
+      case "veeqo":
+        // upc_code_type left blank: Veeqo works it out from the code.
+        if (sku) rows.push([sku, spid, "", ns]);
+        break;
+      case "ups":
+        rows.push([sku, name, sku, ns, spid || (exc === "Y081" ? "No" : ""), s.hsCode ?? "", s.countryOfOrigin ?? "", ready]);
+        break;
+      default:
+        rows.push([s.productTitle, s.variantTitle, sku, ns, spid, exc, s.hsCode ?? "", s.countryOfOrigin ?? "", sku && ns && (spid || exc) ? fedexPidText(sku, ns, spid) : "", ready]);
     }
   }
   return toCsv(rows);

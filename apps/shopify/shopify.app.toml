@@ -9,9 +9,9 @@ embedded = true
 automatically_update_urls_on_dev = false
 
 [access_scopes]
-# read_orders: country + line items of the last 60 days, to show only items shipped to the EU.
-# No customer names, emails, phones or addresses are read.
-scopes = "read_products,write_products,read_inventory,write_inventory,read_orders"
+# read_shipping: shipping zones, to show only products that can ship to the EU.
+# No orders or customer data are read.
+scopes = "read_products,write_products,read_inventory,write_inventory,read_shipping"
 
 [auth]
 redirect_urls = [

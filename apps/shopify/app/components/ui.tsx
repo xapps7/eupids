@@ -134,3 +134,14 @@ export function daysLeft(now = new Date()) {
 }
 
 export const DISCLAIMER = "PID Ready checks your data. It is not legal or customs advice.";
+
+/**
+ * A date in the viewer's own time zone. The server renders the plain ISO date and the browser
+ * swaps in the local format after load, so server and client HTML match (no hydration error).
+ */
+export function When({ iso, date }: { iso: string | Date; date?: boolean }) {
+  const d = new Date(iso);
+  const [txt, set] = useState("");
+  useEffect(() => set(date ? d.toLocaleDateString() : d.toLocaleString()), [d.getTime(), date]); // eslint-disable-line react-hooks/exhaustive-deps
+  return <span>{txt || d.toISOString().slice(0, 10)}</span>;
+}

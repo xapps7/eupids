@@ -2,8 +2,8 @@
 // (inside the Gql client), at most 2 running jobs per shop, resumable after a crash.
 import type { Job, PrismaClient } from "@prisma/client";
 import type { Gql } from "./gql.server";
-import { addNspidToBarcodes, applyChanges, type WriteItem } from "./writes.server";
-import { syncEuOrders } from "./eu-orders.server";
+import { publishCodes, applyChanges, type WriteItem } from "./writes.server";
+import { syncEuShipping } from "./eu-shipping.server";
 import { reevaluateShop } from "./evaluate.server";
 import { log } from "./log.server";
 
@@ -15,7 +15,7 @@ export type JobType = "no_barcode_bulk" | "csv_apply" | "supplier_apply" | "barc
 export type NoBarcodePayload = { variantIds: string[] };
 export type CsvApplyPayload = { items: WriteItem[]; fileName?: string };
 export type SupplierApplyPayload = { requestId: string; submissionIds: string[] };
-export type BarcodeSyncPayload = { variantIds: string[] };
+export type BarcodeSyncPayload = { variantIds: string[]; flavorcloud?: boolean };
 
 export type Failure = { variantId: string; status: string; errors: Record<string, string> };
 
@@ -59,7 +59,7 @@ export async function runJob(db: PrismaClient, gql: Gql, jobId: string) {
     return;
   }
   if (job.type === "eu_sync") {
-    const r = await syncEuOrders(db, gql, job.shopId);
+    const r = await syncEuShipping(db, gql, job.shopId);
     await db.job.update({ where: { id: job.id }, data: { status: r.ok ? "complete" : "failed", done: 1, total: 1 } });
     return;
   }
@@ -81,7 +81,9 @@ export async function runJob(db: PrismaClient, gql: Gql, jobId: string) {
     }
     const batchLen = Math.min(BATCH, count - i);
     const outcomes = syncIds
-      ? await addNspidToBarcodes(db, gql, { shopId: job.shopId, actor }, syncIds.slice(i, i + BATCH))
+      ? await publishCodes(db, gql, { shopId: job.shopId, actor }, syncIds.slice(i, i + BATCH), {
+          flavorcloud: !!(job.payload as BarcodeSyncPayload).flavorcloud,
+        })
       : await applyChanges(
           db,
           gql,

@@ -7,7 +7,7 @@ import prisma from "../db.server";
 import { adminContext, syncPlan } from "../lib/context.server";
 import * as supplier from "../lib/supplier.server";
 import { checkFixGate, upgradeResponse } from "../lib/gate.server";
-import { JobProgress, downloadFile, toast } from "../components/ui";
+import { JobProgress, downloadFile, toast, When } from "../components/ui";
 import { Checkbox, Mono } from "../components/wc";
 import { UpgradePrompt, type Upgrade } from "../components/UpgradePrompt";
 
@@ -119,7 +119,7 @@ export default function RequestDetail() {
                 {request.items} items · link <s-badge tone={request.state === "active" ? "success" : "neutral"}>{request.state}</s-badge>
               </s-text>
               <s-text color="subdued">
-                {request.state === "active" ? `Expires ${new Date(request.expiresAt).toLocaleDateString()}` : "The supplier can’t open this link."}
+                {request.state === "active" ? <>Expires <When iso={request.expiresAt} date /></> : "The supplier can’t open this link."}
                 {request.supplierEmail ? ` · ${request.supplierEmail}` : ""}
               </s-text>
             </s-stack>
